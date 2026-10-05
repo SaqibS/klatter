@@ -38,7 +38,6 @@ fn dominance(p: Option<Ph>) -> u8 {
 
 /// (frames inside the dominant segment, frames inside the weaker segment).
 fn transition_frames(strong: Ph) -> (usize, usize) {
-    let ms = |x: f64| (x / FRAME_MS).round() as usize;
     match strong.class() {
         Class::Stop | Class::Affricate => (
             0,
@@ -55,6 +54,56 @@ fn transition_frames(strong: Ph) -> (usize, usize) {
     }
 }
 
+fn ms(x: f64) -> usize {
+    (x / FRAME_MS).round() as usize
+}
+
+/// Transition timings from Hertz & Huffman (1992) and Hertz, Younes &
+/// Zinovieva (1999).
+const RELEASE_AFTER_FRICATIVE_MS: f64 = 30.0;
+const RELEASE_AFTER_ASPIRATION_MS: f64 = 70.0;
+const CLOSURE_AFTER_OFFGLIDE_MS: f64 = 15.0;
+const DIPHTHONG_GLIDE_MS: f64 = 80.0;
+const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
+const MIN_ONSET_MS: f64 = 30.0;
+
+fn is_obstruent(p: Ph) -> bool {
+    matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
+}
+
+/// (frames before, frames after) the boundary between segments `i` and `i + 1`.
+fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
+    let (lp, rp) = (segs[i].ph?, segs[i + 1].ph?);
+    let (dl, dr) = (dominance(Some(lp)), dominance(Some(rp)));
+    Some(if dl > dr {
+        // Formants move during aspiration, so the release transition spans it.
+        let release = match lp.class() {
+            Class::Fricative => Some(RELEASE_AFTER_FRICATIVE_MS),
+            Class::Stop if prosody::aspiration_ms(segs, i) > 0.0 => {
+                Some(RELEASE_AFTER_ASPIRATION_MS)
+            }
+            _ => None,
+        };
+        match release {
+            Some(r) => (0, ms(r)),
+            None => transition_frames(lp),
+        }
+    } else if dr > dl {
+        let (inside, outside) = transition_frames(rp);
+        // An offglide already sits near the consonant's target, so the closure is quick.
+        let offglide = lp.spec().f_end.is_some() || (segs[i].coda && dl == 2);
+        if offglide && is_obstruent(rp) {
+            (ms(CLOSURE_AFTER_OFFGLIDE_MS), inside)
+        } else {
+            (outside, inside)
+        }
+    } else if dl == 1 {
+        transition_frames(Ph::AX)
+    } else {
+        (2, 2)
+    })
+}
+
 #[derive(Clone, Copy)]
 struct Formants {
     f: [f64; 3],
@@ -68,11 +117,22 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 /// Per-frame formant targets of a segment, before coarticulation.
 fn targets(ph: Ph, len: usize) -> Vec<Formants> {
     let spec = ph.spec();
+    let frames = |ms: f64| ms / FRAME_MS;
+    // Hertz, Younes & Zinovieva (1999): AY, AW and OY are vowel plus glide, with
+    // a fixed glide transition and a brief offglide; the onset vowel takes the
+    // rest. Short ones and the one-phone diphthongs scale proportionally.
+    let fixed = matches!(ph, Ph::AY | Ph::AW | Ph::OY)
+        && len as f64 >= frames(DIPHTHONG_GLIDE_MS + DIPHTHONG_OFFGLIDE_MS + MIN_ONSET_MS);
+    let (glide_start, glide_len) = if fixed {
+        let glide = frames(DIPHTHONG_GLIDE_MS);
+        (len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide, glide)
+    } else {
+        (0.25 * len as f64, 0.6 * len as f64)
+    };
     (0..len)
         .map(|k| match spec.f_end {
             Some(end) => {
-                // Diphthongs hold the onset, glide, then hold the offglide.
-                let t = ((k as f64 / len.max(1) as f64 - 0.25) / 0.6).clamp(0.0, 1.0);
+                let t = ((k as f64 - glide_start) / glide_len.max(1.0)).clamp(0.0, 1.0);
                 Formants {
                     f: std::array::from_fn(|j| lerp(spec.f[j], end[j], t)),
                     b: spec.b,
@@ -127,20 +187,8 @@ fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formant
     let target = track.clone();
 
     for i in 0..n.saturating_sub(1) {
-        let (l, r) = (segs[i].ph, segs[i + 1].ph);
-        let (Some(lp), Some(rp)) = (l, r) else {
+        let Some((left_frames, right_frames)) = transition_window(segs, i) else {
             continue;
-        };
-        let (dl, dr) = (dominance(Some(lp)), dominance(Some(rp)));
-        let (left_frames, right_frames) = if dl > dr {
-            transition_frames(lp)
-        } else if dr > dl {
-            let (inside, outside) = transition_frames(rp);
-            (outside, inside)
-        } else if dl == 1 {
-            transition_frames(Ph::AX)
-        } else {
-            (2, 2)
         };
         // Leave at least one frame of each segment untouched by this window.
         let left_frames = left_frames.min(lens[i].saturating_sub(1) / 2);
@@ -170,27 +218,7 @@ fn release_frames(ph: Ph) -> usize {
 }
 
 fn aspiration_frames(segs: &[Seg], i: usize, next_len: usize) -> usize {
-    let s = &segs[i];
-    let Some(ph) = s.ph else { return 0 };
-    let after_s = i > 0 && segs[i - 1].ph == Some(Ph::S) && !s.word_initial;
-    let next_sonorant = segs
-        .get(i + 1)
-        .and_then(|n| n.ph)
-        .is_some_and(Ph::is_sonorant);
-    if !ph.is_plosive() || ph.is_voiced() || after_s || !next_sonorant {
-        return 0;
-    }
-    let ms = if segs[i + 1].stress > 0 && !segs[i + 1].function_word {
-        50.0
-    } else {
-        25.0
-    };
-    let ms = if ph.place() == Place::Velar {
-        ms + 10.0
-    } else {
-        ms
-    };
-    ((ms / FRAME_MS).round() as usize).min(next_len / 2)
+    ((prosody::aspiration_ms(segs, i) / FRAME_MS).round() as usize).min(next_len / 2)
 }
 
 fn is_voiceless(p: Option<Ph>) -> bool {

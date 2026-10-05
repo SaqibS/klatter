@@ -3,6 +3,7 @@
 
 use crate::lexicon;
 use crate::lts;
+use crate::morph::{self, Suffix};
 use crate::phoneme::Ph;
 use crate::text::{Break, Token};
 
@@ -55,17 +56,23 @@ pub fn pronounce(word: &str) -> Vec<(Ph, u8)> {
             .filter_map(|(p, s)| Ph::parse(&p).map(|ph| (ph, s)))
             .collect();
     }
-    if let Some(base) = word.strip_suffix("'S").filter(|b| !b.is_empty()) {
-        let mut phones = pronounce(base);
-        if let Some(&(last, _)) = phones.last() {
-            use Ph::*;
-            match last {
-                S | Z | SH | ZH | CH | JH => phones.extend([(IH, 0), (Z, 0)]),
-                P | T | K | F | TH => phones.push((S, 0)),
-                _ => phones.push((Z, 0)),
+    let split = match word.strip_suffix("'S").filter(|b| !b.is_empty()) {
+        Some(base) => Some((base.to_string(), Suffix::S)),
+        None => morph::split(word),
+    };
+    if let Some((root, suffix)) = split {
+        let mut phones = pronounce(&root);
+        if !phones.is_empty() {
+            // Roots like DO and BE are unstressed function words, but doing and being are not.
+            if suffix != Suffix::S
+                && phones.iter().all(|p| p.1 == 0)
+                && let Some(v) = phones.iter_mut().find(|p| p.0.is_vowel())
+            {
+                v.1 = 1;
             }
+            phones.extend(morph::suffix_phones(phones.last().map(|p| p.0), suffix));
+            return phones;
         }
-        return phones;
     }
     let letters: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect();
     let phones = lts::letters_to_phonemes(word);

@@ -11,6 +11,7 @@
 pub mod klatt;
 pub mod lexicon;
 pub mod lts;
+pub mod morph;
 pub mod params;
 pub mod phoneme;
 pub mod prosody;

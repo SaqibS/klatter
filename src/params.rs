@@ -10,6 +10,22 @@ const ASPIRATION_DB: f64 = 55.0;
 const VOICE_BAR_DB: f64 = 47.0;
 const NASAL_ZERO_HZ: f64 = 450.0;
 
+/// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
+/// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII).
+const MODAL_OQ: f64 = 50.0;
+const BREATHY_OQ: f64 = 80.0;
+const BREATHY_TL: f64 = 20.0;
+const BREATHY_AH: f64 = 52.0;
+/// Table XIV stimulus 11: B1 200 to 400 Hz and B2 110 to 170 Hz.
+const BREATHY_B1_HZ: f64 = 200.0;
+const BREATHY_B2_HZ: f64 = 60.0;
+/// Fig. 15: AV falls about 10 dB over a breathy offset into silence.
+const OFFSET_AV_DROP_DB: f64 = 10.0;
+/// Ramp lengths read from Figs. 15 and 16.
+const OFFSET_RAMP_MS: f64 = 100.0;
+const VOICELESS_RAMP_MS: f64 = 80.0;
+const VOICELESS_PEAK: f64 = 0.8;
+
 /// How strongly a segment imposes its formant targets on its neighbours.
 fn dominance(p: Option<Ph>) -> u8 {
     match p.map(Ph::class) {
@@ -177,6 +193,64 @@ fn aspiration_frames(segs: &[Seg], i: usize, next_len: usize) -> usize {
     ((ms / FRAME_MS).round() as usize).min(next_len / 2)
 }
 
+fn is_voiceless(p: Option<Ph>) -> bool {
+    p.is_some_and(|p| !p.is_voiced())
+}
+
+/// Per-frame (breathiness, offset) for a sonorant: breathiness 0 is modal and
+/// 1 fully breathy; offset rises from 0 to 1 over a vowel ending in silence.
+/// Klatt & Klatt (1990) found breathiness rises toward vowel offsets into
+/// silence and near voiceless consonants, and is greater in unstressed and
+/// sentence-final syllables.
+fn breathiness(segs: &[Seg], i: usize, len: usize) -> Vec<(f64, f64)> {
+    let s = &segs[i];
+    let prev = if i > 0 { segs[i - 1].ph } else { None };
+    let next = segs.get(i + 1).and_then(|n| n.ph);
+    let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
+    let frames = |ms: f64| (ms / FRAME_MS).max(1.0);
+    let mut floor: f64 = 0.0;
+    if s.stress == 0 || s.function_word {
+        floor = 0.15;
+    }
+    if s.phrase_final {
+        floor = floor.max(0.25);
+    }
+    (0..len)
+        .map(|k| {
+            let from_end = (len - k) as f64;
+            let mut b = floor;
+            let mut offset = 0.0;
+            if before_silence {
+                offset = (1.0 - from_end / frames(OFFSET_RAMP_MS)).max(0.0);
+                b = b.max(offset);
+            } else if is_voiceless(next) {
+                b = b.max(VOICELESS_PEAK * (1.0 - from_end / frames(VOICELESS_RAMP_MS)));
+            }
+            if is_voiceless(prev) {
+                b = b.max(VOICELESS_PEAK * (1.0 - (k + 1) as f64 / frames(VOICELESS_RAMP_MS)));
+            }
+            (b.clamp(0.0, 1.0), offset)
+        })
+        .collect()
+}
+
+/// Applies breathy phonation (Klatt & Klatt 1990, Sec. III B steps 5 and 6):
+/// a higher open quotient strengthens the first harmonic, spectral tilt
+/// weakens the upper harmonics, aspiration noise replaces them, and glottal
+/// losses widen B1 and B2.
+fn apply_voice_quality(fr: &mut Frame, b: f64, offset: f64) {
+    fr.oq = lerp(MODAL_OQ, BREATHY_OQ, b);
+    fr.tl = BREATHY_TL * b;
+    fr.b[0] += BREATHY_B1_HZ * b;
+    fr.b[1] += BREATHY_B2_HZ * b;
+    fr.av -= OFFSET_AV_DROP_DB * offset;
+    if b > 0.0 {
+        // Noise amplitude grows in proportion to breathiness, so it fades in
+        // from silence rather than switching on.
+        fr.ah = fr.ah.max(BREATHY_AH + 20.0 * b.log10());
+    }
+}
+
 pub fn build_frames(segs: &[Seg]) -> Vec<Frame> {
     let (starts, lens) = frame_layout(segs);
     let formants = formant_tracks(segs, &starts, &lens);
@@ -251,6 +325,18 @@ pub fn build_frames(segs: &[Seg]) -> Vec<Frame> {
             fr.b[0] += 150.0;
         }
     }
+
+    for i in 0..segs.len() {
+        if !segs[i].ph.is_some_and(Ph::is_sonorant) {
+            continue;
+        }
+        let b = breathiness(segs, i, lens[i]);
+        for (fr, b) in frames[starts[i]..starts[i] + lens[i]].iter_mut().zip(b) {
+            if fr.av > 0.0 {
+                apply_voice_quality(fr, b.0, b.1);
+            }
+        }
+    }
     frames
 }
 
@@ -285,6 +371,16 @@ mod tests {
         let stop = segs.iter().position(|s| s.ph == Some(Ph::T)).unwrap();
         assert_eq!(frames[starts[stop]].av, 0.0);
         assert_eq!(frames[starts[stop]].af, 0.0);
+    }
+
+    #[test]
+    fn vowel_becomes_breathy_before_silence() {
+        let (segs, starts, lens, frames) = frames_for("saw");
+        let vowel = segs.iter().position(|s| s.ph == Some(Ph::AO)).unwrap();
+        let mid = frames[starts[vowel] + lens[vowel] / 2];
+        let last = frames[starts[vowel] + lens[vowel] - 1];
+        assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
+        assert!(last.av > 0.0);
     }
 
     #[test]

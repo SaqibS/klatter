@@ -266,13 +266,14 @@ fn smooth(f0: &mut [f64], width: usize) {
 }
 
 /// Slow quasi-random F0 drift (KLSYN88 "flutter") so steady vowels don't sound
-/// mechanical.
+/// mechanical. Klatt & Klatt (1990) found FL = 25% sounds realistic.
 fn add_flutter(f0: &mut [f64], frame_ms: f64) {
     use std::f64::consts::TAU;
+    const FL: f64 = 25.0;
     for (i, v) in f0.iter_mut().enumerate() {
         let t = i as f64 * frame_ms / 1000.0;
         let wobble = (TAU * 12.7 * t).sin() + (TAU * 7.1 * t).sin() + (TAU * 4.7 * t).sin();
-        *v *= 1.0 + 0.004 * wobble;
+        *v += (FL / 50.0) * (*v / 100.0) * wobble;
     }
 }
 

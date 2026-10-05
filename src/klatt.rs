@@ -14,7 +14,8 @@
 
 use std::f64::consts::PI;
 
-pub const FRAME_MS: f64 = 5.0;
+const FRAME_RATE: u32 = 200;
+pub const FRAME_MS: f64 = 1000.0 / FRAME_RATE as f64;
 
 /// Constants at their KLSYN88 defaults (Klatt & Klatt 1990, Table XII).
 const F4: f64 = 3250.0;
@@ -383,6 +384,7 @@ impl Radiation {
 
 pub struct Synth {
     sr: f64,
+    sample_remainder: u64,
     source: GlottalSource,
     noise: NoiseSource,
     tilt: Resonator,
@@ -408,6 +410,7 @@ impl Synth {
         let sr = sample_rate as f64;
         let mut s = Synth {
             sr,
+            sample_remainder: 0,
             source: GlottalSource::new(),
             noise: NoiseSource::new(),
             tilt: Resonator::default(),
@@ -483,13 +486,17 @@ impl Synth {
         (voice + voice_bar, noise, open)
     }
 
-    /// Renders frames to floating-point samples (unnormalized).
+    /// Renders frames to floating-point samples (unnormalized), preserving
+    /// source, filter and fractional-sample timing state across calls.
     pub fn render(&mut self, frames: &[Frame]) -> Vec<f64> {
         let spf = self.sr * FRAME_MS / 1000.0;
         let mut out = Vec::with_capacity((frames.len() as f64 * spf) as usize + 1);
-        for (i, fr) in frames.iter().enumerate() {
+        for fr in frames {
             self.configure(fr);
-            let n = ((i + 1) as f64 * spf).floor() as usize - (i as f64 * spf).floor() as usize;
+            // Integer accounting avoids drift at rates with fractional samples per frame.
+            self.sample_remainder += self.sr as u64;
+            let n = (self.sample_remainder / FRAME_RATE as u64) as usize;
+            self.sample_remainder %= FRAME_RATE as u64;
             let av = db_to_lin(fr.av);
             let avs = db_to_lin(fr.avs) * VOICE_BAR_GAIN;
             let ah = db_to_lin(fr.ah) * ASPIRATION_GAIN;
@@ -676,6 +683,39 @@ mod tests {
             (noise_db - voice_db).abs() < 1.0,
             "noise {noise_db:.1} dB vs voicing {voice_db:.1} dB"
         );
+    }
+
+    #[test]
+    fn chunked_rendering_matches_whole_rendering() {
+        let frames: Vec<Frame> = (0..200)
+            .map(|i| Frame {
+                f0: 100.0 + i as f64 / 4.0,
+                av: if i % 9 < 6 { 60.0 } else { 0.0 },
+                ah: 40.0,
+                tl: (i % 20) as f64,
+                af: if i % 9 >= 6 { 55.0 } else { 0.0 },
+                ab: 50.0,
+                ..Frame::default()
+            })
+            .collect();
+        for sr in [8000, 16000, 16001, 22050, 44100, 48000] {
+            let whole = Synth::new(sr).render(&frames);
+            assert_eq!(whole.len(), sr as usize);
+            assert!(whole.iter().all(|s| s.is_finite()));
+            for chunk_size in [1, 7, 37] {
+                let mut synth = Synth::new(sr);
+                let mut chunked = Vec::new();
+                for chunk in frames.chunks(chunk_size) {
+                    assert!(synth.render(&[]).is_empty());
+                    chunked.extend(synth.render(chunk));
+                }
+                assert_eq!(chunked.len(), whole.len(), "{sr} Hz, {chunk_size} frames");
+                assert!(
+                    chunked == whole,
+                    "{sr} Hz, {chunk_size} frames: waveform mismatch"
+                );
+            }
+        }
     }
 
     #[test]

@@ -165,13 +165,6 @@ pub fn assign_durations(segs: &mut [Seg]) {
         } else if s.phrase_final && s.coda {
             // Phrase-final codas keep their final lengthening.
         } else if is_cons(prev) && is_cons(next) {
-            if next.is_some_and(Ph::is_vowel) {
-                prcnt *= 1.2;
-            }
-            if prev.is_some_and(Ph::is_vowel) {
-                prcnt *= 0.7;
-            }
-        } else if is_cons(prev) && is_cons(next) {
             prcnt *= 0.5;
         } else if is_cons(next) || is_cons(prev) {
             prcnt *= 0.7;
@@ -209,7 +202,7 @@ pub fn assign_durations(segs: &mut [Seg]) {
         if asp > 0.0 {
             let floor = segs[i].ph.map_or(0.0, |p| p.durations().1 / 2.0);
             segs[i].dur_ms =
-                (segs[i].dur_ms + asp - VOWEL_SHORTENING_AFTER_ASPIRATION_MS).max(floor);
+                (segs[i].dur_ms - VOWEL_SHORTENING_AFTER_ASPIRATION_MS).max(floor) + asp;
         }
     }
 }
@@ -305,8 +298,12 @@ fn clause_contour(
             f0[frame] += ACCENT * w.max(0.0);
         }
     }
-    // Terminal contour after the hat comes down.
-    let tail_start = hat_off.min(end);
+    // Boundary tones also apply to clauses with no pitch accents.
+    let tail_start = last_accent.map(peak_of).unwrap_or_else(|| {
+        segs.iter()
+            .rposition(Seg::is_vowel)
+            .map_or(begin, |k| starts[k])
+    });
     let tail_len = (end - tail_start).max(1) as f64;
     let top = if tail_start > begin {
         f0[tail_start - 1]
@@ -409,6 +406,20 @@ mod tests {
     }
 
     #[test]
+    fn aspiration_does_not_consume_the_voiced_minimum() {
+        let mut segs = build(&normalize("try"));
+        for s in &mut segs {
+            s.stress = 0;
+            s.function_word = true;
+        }
+        assign_durations(&mut segs);
+        let r = segs.iter().position(|s| s.ph == Some(Ph::R)).unwrap();
+        let asp = aspiration_ms(&segs, r - 1);
+        assert_eq!(asp, 25.0);
+        assert_eq!(segs[r].dur_ms, asp + Ph::R.durations().1 / 2.0);
+    }
+
+    #[test]
     fn durations_respect_minimums() {
         for (p, d) in durations("the quick brown fox jumps over the lazy dog") {
             assert!(d >= p.durations().1 / 2.0 - 1e-9, "{p:?} {d}");
@@ -416,8 +427,49 @@ mod tests {
     }
 
     #[test]
+    fn consonant_between_consonants_gets_cluster_shortening() {
+        let d = durations("extra cat");
+        let s = d.iter().find(|(p, _)| *p == Ph::S).unwrap().1;
+        let (inh, min) = Ph::S.durations();
+        let expected = (inh - min) * 0.85 * 0.5 + min;
+        assert!((s - expected).abs() < 1e-9, "{s} vs {expected}");
+    }
+
+    #[test]
+    fn cluster_shortening_respects_pauses_and_final_codas() {
+        let last_t = |text: &str| {
+            durations(text)
+                .into_iter()
+                .rev()
+                .find(|(p, _)| *p == Ph::T)
+                .unwrap()
+                .1
+        };
+        let (inh, min) = Ph::T.durations();
+        let final_t = (inh - min) * 1.4 * 0.85 + min;
+        assert!((last_t("act") - final_t).abs() < 1e-9);
+        assert!((last_t("act. cat") - final_t).abs() < 1e-9);
+        let first_t = |text: &str| {
+            durations(text)
+                .into_iter()
+                .find(|(p, _)| *p == Ph::T)
+                .unwrap()
+                .1
+        };
+        assert_eq!(first_t("tea"), first_t("bus. tea"));
+        assert!(first_t("bus tea") < first_t("bus. tea"));
+    }
+
+    #[test]
     fn question_rises_and_statement_falls() {
-        for (text, rises) in [("is it raining?", true), ("it is raining.", false)] {
+        for (text, rises) in [
+            ("is it raining?", true),
+            ("it is raining.", false),
+            ("Are you?", true),
+            ("Are you.", false),
+            ("Who?", true),
+            ("Who.", false),
+        ] {
             let mut segs = build(&normalize(text));
             assign_durations(&mut segs);
             let lens: Vec<usize> = segs

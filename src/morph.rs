@@ -4,7 +4,7 @@
 //! letter-to-sound rules apply to the root, and lets the suffix's sound follow
 //! the root's final phoneme.
 
-use crate::phoneme::Ph;
+use crate::{lexicon, phoneme::Ph};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Suffix {
@@ -151,6 +151,21 @@ pub fn split(word: &str) -> Option<(String, Suffix)> {
         .any(|e| word.ends_with(e))
     {
         (word[..word.len() - 2].to_string(), Suffix::S)
+    } else if word.ends_with("SES") || word.ends_with("ZES") {
+        // Spelling alone cannot distinguish BUS + ES from LOSE + S.
+        let s_root = &word[..word.len() - 1];
+        let es_root = &word[..word.len() - 2];
+        // Function words are not evidence for a lexical root, as in USES versus US.
+        let known_root = |root: &str| {
+            lexicon::lookup(root).is_some_and(|entry| entry.iter().any(|(_, stress)| *stress > 0))
+        };
+        let root = match (known_root(s_root), known_root(es_root)) {
+            // Root-level LTS keeps the suffix from changing lexical stress.
+            (_, false) => s_root,
+            (false, true) => es_root,
+            (true, true) => return None,
+        };
+        (root.to_string(), Suffix::S)
     } else {
         let stem = word.strip_suffix('S')?;
         if ["S", "U", "I", "A"].iter().any(|e| stem.ends_with(e)) {
@@ -218,6 +233,19 @@ mod tests {
         ] {
             assert_eq!(split(w), None, "{w}");
         }
+    }
+
+    #[test]
+    fn ambiguous_plurals_use_known_roots() {
+        assert_eq!(root("BUSES").as_deref(), Some("BUS"));
+        assert_eq!(root("GASES").as_deref(), Some("GAS"));
+        assert_eq!(root("LOSES").as_deref(), Some("LOSE"));
+        assert_eq!(root("ROSES").as_deref(), Some("ROSE"));
+        assert_eq!(root("NOSES").as_deref(), Some("NOSE"));
+        assert_eq!(root("USES").as_deref(), Some("USE"));
+        assert_eq!(root("AMAZES").as_deref(), Some("AMAZE"));
+        assert_eq!(root("AMUSES").as_deref(), Some("AMUSE"));
+        assert_eq!(root("ABUSES").as_deref(), Some("ABUSE"));
     }
 
     #[test]

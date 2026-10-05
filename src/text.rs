@@ -197,6 +197,44 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '\''
 }
 
+fn expand_number(num: &str, suffix: &str, allow_year: bool, out: &mut Vec<Token>) {
+    let suffix_lower = suffix.to_ascii_lowercase();
+    let value: Option<u64> = num.parse().ok();
+    match (value, suffix_lower.as_str()) {
+        (Some(n), "st" | "nd" | "rd" | "th") => push_words(out, ordinal(number_words(n))),
+        (Some(n), "s") if n % 10 == 0 => {
+            let mut w =
+                if allow_year { year_words(n) } else { None }.unwrap_or_else(|| number_words(n));
+            let last = w.pop().unwrap_or_default();
+            let plural = match last.strip_suffix('y') {
+                Some(stem) => format!("{stem}ies"),
+                None => format!("{last}s"),
+            };
+            w.push(plural);
+            push_words(out, w);
+        }
+        (Some(n), _) => {
+            let words = if num.len() > 1 && num.starts_with('0') {
+                digit_words(num)
+            } else if allow_year && num.len() == 4 {
+                year_words(n).unwrap_or_else(|| number_words(n))
+            } else {
+                number_words(n)
+            };
+            push_words(out, words);
+            if !suffix.is_empty() {
+                expand_word(suffix, out);
+            }
+        }
+        (None, _) => {
+            push_words(out, digit_words(num));
+            if !suffix.is_empty() {
+                expand_word(suffix, out);
+            }
+        }
+    }
+}
+
 fn expand_word(raw: &str, out: &mut Vec<Token>) {
     let word = raw.trim_matches('\'');
     if word.is_empty() {
@@ -209,40 +247,7 @@ fn expand_word(raw: &str, out: &mut Vec<Token>) {
         .unwrap_or(word.len());
     if digits_end > 0 {
         let (num, suffix) = word.split_at(digits_end);
-        let suffix_lower = suffix.to_ascii_lowercase();
-        let value: Option<u64> = num.parse().ok();
-        match (value, suffix_lower.as_str()) {
-            (Some(n), "st" | "nd" | "rd" | "th") => push_words(out, ordinal(number_words(n))),
-            (Some(n), "s") if n % 10 == 0 => {
-                let mut w = year_words(n).unwrap_or_else(|| number_words(n));
-                let last = w.pop().unwrap_or_default();
-                let plural = match last.strip_suffix('y') {
-                    Some(stem) => format!("{stem}ies"),
-                    None => format!("{last}s"),
-                };
-                w.push(plural);
-                push_words(out, w);
-            }
-            (Some(n), _) => {
-                let words = if num.len() > 1 && num.starts_with('0') {
-                    digit_words(num)
-                } else if num.len() == 4 {
-                    year_words(n).unwrap_or_else(|| number_words(n))
-                } else {
-                    number_words(n)
-                };
-                push_words(out, words);
-                if !suffix.is_empty() {
-                    expand_word(suffix, out);
-                }
-            }
-            (None, _) => {
-                push_words(out, digit_words(num));
-                if !suffix.is_empty() {
-                    expand_word(suffix, out);
-                }
-            }
-        }
+        expand_number(num, suffix, true, out);
         return;
     }
 
@@ -312,11 +317,24 @@ fn is_thousands_separator(chars: &[char], i: usize) -> bool {
 
 pub fn normalize(text: &str) -> Vec<Token> {
     let mut out = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
+    let chars: Vec<char> = text
+        .chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{ff07}' => '\'',
+            _ => c,
+        })
+        .collect();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_ascii_digit() {
+        let negative = (c == '\u{2212}'
+            || (c == '-' && (i == 0 || (!is_word_char(chars[i - 1]) && chars[i - 1] != '-'))))
+            && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit());
+        if c.is_ascii_digit() || negative {
+            if negative {
+                push_words(&mut out, ["minus".to_string()]);
+                i += 1;
+            }
             // Gather numbers with thousands separators and decimals.
             let start = i;
             let mut j = i;
@@ -326,6 +344,7 @@ pub fn normalize(text: &str) -> Vec<Token> {
                 j += 1;
             }
             let int_part: String = chars[start..j].iter().filter(|c| **c != ',').collect();
+            let allow_year = !negative && !chars[start..j].contains(&',');
             let mut words = Vec::new();
             if j + 1 < chars.len() && chars[j] == '.' && chars[j + 1].is_ascii_digit() {
                 let mut k = j + 1;
@@ -346,7 +365,7 @@ pub fn normalize(text: &str) -> Vec<Token> {
                 continue;
             }
             if j < chars.len() && chars[j] == '%' {
-                expand_word(&int_part, &mut out);
+                expand_number(&int_part, "", false, &mut out);
                 push_words(&mut out, ["percent".to_string()]);
                 i = j + 1;
                 continue;
@@ -355,11 +374,8 @@ pub fn normalize(text: &str) -> Vec<Token> {
             while k < chars.len() && chars[k].is_ascii_alphabetic() {
                 k += 1;
             }
-            let token: String = int_part
-                .chars()
-                .chain(chars[j..k].iter().copied())
-                .collect();
-            expand_word(&token, &mut out);
+            let suffix: String = chars[j..k].iter().collect();
+            expand_number(&int_part, &suffix, allow_year, &mut out);
             i = k;
             continue;
         }
@@ -505,5 +521,66 @@ mod tests {
         assert_eq!(words("Wait..."), "wait .");
         assert_eq!(words("BBC & TV"), "bee bee see and tee vee .");
         assert_eq!(words("don't"), "don't .");
+    }
+
+    #[test]
+    fn typographic_apostrophes_preserve_words() {
+        for apostrophe in ['\u{2018}', '\u{2019}', '\u{02bc}', '\u{ff07}'] {
+            for word in ["don't", "Klatt's", "we're", "dogs'"] {
+                assert_eq!(
+                    normalize(&word.replace('\'', &apostrophe.to_string())),
+                    normalize(word)
+                );
+            }
+        }
+        assert_eq!(normalize("\u{2018}hello\u{2019}"), normalize("'hello'"));
+    }
+
+    #[test]
+    fn grouped_numbers_are_quantities_not_years() {
+        assert_eq!(
+            words("1,234 people"),
+            "one thousand two hundred thirty four people ."
+        );
+        assert_eq!(words("1,984"), "one thousand nine hundred eighty four .");
+        assert_eq!(words("1,234th"), "one thousand two hundred thirty fourth .");
+        assert_eq!(
+            words("1,234%"),
+            "one thousand two hundred thirty four percent ."
+        );
+        assert_eq!(
+            words("1,234.5"),
+            "one thousand two hundred thirty four point five ."
+        );
+        assert_eq!(
+            words("1,234cats"),
+            "one thousand two hundred thirty four cats ."
+        );
+        assert_eq!(words("1984"), "nineteen eighty four .");
+        assert_eq!(words("007"), "zero zero seven .");
+    }
+
+    #[test]
+    fn negative_numbers_keep_the_sign() {
+        assert_eq!(words("-5"), "minus five .");
+        assert_eq!(
+            words("it is -3.5%"),
+            "it is minus three point five percent ."
+        );
+        assert_eq!(
+            words("-1,234"),
+            "minus one thousand two hundred thirty four ."
+        );
+        assert_eq!(
+            words("-1234"),
+            "minus one thousand two hundred thirty four ."
+        );
+        assert_eq!(words("\u{2212}5"), "minus five .");
+        assert_eq!(words("well-known"), "well known .");
+        assert_eq!(
+            words("1984-1985"),
+            "nineteen eighty four nineteen eighty five ."
+        );
+        assert_eq!(words("wait--5"), "wait , five .");
     }
 }

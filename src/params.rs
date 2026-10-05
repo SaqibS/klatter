@@ -104,6 +104,36 @@ fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
     })
 }
 
+fn transition_windows(segs: &[Seg], lens: &[usize]) -> Vec<(usize, usize)> {
+    let mut windows: Vec<(usize, usize)> = (0..segs.len().saturating_sub(1))
+        .map(|i| transition_window(segs, i).unwrap_or((0, 0)))
+        .collect();
+    for i in 0..segs.len() {
+        let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
+        let outgoing = windows.get(i).map_or(0, |w| w.0);
+        let available = lens[i].saturating_sub(1);
+        if incoming + outgoing > available {
+            // Share only contested time, keeping one target frame between transitions.
+            let aspiration = if i > 0 {
+                aspiration_frames(segs, i - 1, available)
+            } else {
+                0
+            };
+            let incoming = incoming
+                .min(available / 2)
+                .max(available.saturating_sub(outgoing))
+                .max(aspiration);
+            if i > 0 {
+                windows[i - 1].1 = incoming;
+            }
+            if let Some(w) = windows.get_mut(i) {
+                w.0 = outgoing.min(available - incoming);
+            }
+        }
+    }
+    windows
+}
+
 #[derive(Clone, Copy)]
 struct Formants {
     f: [f64; 3],
@@ -164,6 +194,7 @@ pub fn frame_layout(segs: &[Seg]) -> (Vec<usize>, Vec<usize>) {
 
 fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formants> {
     let n = segs.len();
+    let windows = transition_windows(segs, lens);
     // Pauses and /h/ borrow formants from a neighbour so nothing jumps oddly.
     let resolved: Vec<Option<Ph>> = (0..n)
         .map(|i| match segs[i].ph {
@@ -176,7 +207,14 @@ fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formant
     let mut track: Vec<Formants> = Vec::new();
     for i in 0..n {
         let ph = resolved[i].unwrap_or(Ph::AX);
-        let mut t = targets(ph, lens[i]);
+        // The offglide must finish before the outgoing transition can leave its target.
+        let outgoing = if ph.spec().f_end.is_some() {
+            windows.get(i).map_or(0, |w| w.0)
+        } else {
+            0
+        };
+        let mut t = targets(ph, lens[i] - outgoing);
+        t.resize(lens[i], *t.last().unwrap());
         if segs[i].ph == Some(Ph::HH) {
             for f in &mut t {
                 f.b = [300.0, 150.0, 200.0];
@@ -186,13 +224,7 @@ fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formant
     }
     let target = track.clone();
 
-    for i in 0..n.saturating_sub(1) {
-        let Some((left_frames, right_frames)) = transition_window(segs, i) else {
-            continue;
-        };
-        // Leave at least one frame of each segment untouched by this window.
-        let left_frames = left_frames.min(lens[i].saturating_sub(1) / 2);
-        let right_frames = right_frames.min(lens[i + 1].saturating_sub(1) / 2);
+    for (i, &(left_frames, right_frames)) in windows.iter().enumerate() {
         let boundary = starts[i + 1];
         let a = boundary - left_frames;
         let b = boundary + right_frames;
@@ -218,7 +250,7 @@ fn release_frames(ph: Ph) -> usize {
 }
 
 fn aspiration_frames(segs: &[Seg], i: usize, next_len: usize) -> usize {
-    ((prosody::aspiration_ms(segs, i) / FRAME_MS).round() as usize).min(next_len / 2)
+    ms(prosody::aspiration_ms(segs, i)).min(next_len)
 }
 
 fn is_voiceless(p: Option<Ph>) -> bool {
@@ -399,6 +431,118 @@ mod tests {
         let stop = segs.iter().position(|s| s.ph == Some(Ph::T)).unwrap();
         assert_eq!(frames[starts[stop]].av, 0.0);
         assert_eq!(frames[starts[stop]].af, 0.0);
+    }
+
+    #[test]
+    fn aspiration_matches_the_prosodic_budget() {
+        for text in ["tea", "tree", "try", "quick", "to be", "key", "stay", "dee"] {
+            let (segs, starts, lens, frames) = frames_for(text);
+            for i in 0..segs.len() - 1 {
+                if !segs[i].ph.is_some_and(Ph::is_plosive) {
+                    continue;
+                }
+                let next = &frames[starts[i + 1]..starts[i + 1] + lens[i + 1]];
+                let actual = next
+                    .iter()
+                    .take_while(|f| f.av == 0.0 && f.ah > 0.0)
+                    .count();
+                let expected = ms(prosody::aspiration_ms(&segs, i));
+                assert_eq!(actual, expected, "{text}: {:?}", segs[i].ph);
+            }
+        }
+    }
+
+    #[test]
+    fn release_transition_can_use_more_than_half_the_segment() {
+        let (mut segs, _, _, _) = frames_for("tea");
+        let vowel = segs.iter().position(|s| s.ph == Some(Ph::IY)).unwrap();
+        segs[vowel].dur_ms = 100.0;
+        let (starts, lens) = frame_layout(&segs);
+        let frames = build_frames(&segs);
+        let start = starts[vowel];
+        let release = ms(RELEASE_AFTER_ASPIRATION_MS);
+        assert!(release > lens[vowel] / 2);
+        let target = Ph::IY.spec().f;
+        assert_ne!(frames[start + release - 1].f, target);
+        assert_eq!(frames[start + release].f, target);
+    }
+
+    #[test]
+    fn short_sonorants_keep_aspiration_and_a_voiced_target() {
+        let (mut segs, _, _, _) = frames_for("try");
+        for s in &mut segs {
+            s.stress = 0;
+            s.function_word = true;
+        }
+        assign_durations(&mut segs);
+        let (starts, lens) = frame_layout(&segs);
+        let windows = transition_windows(&segs, &lens);
+        let frames = build_frames(&segs);
+        let r = segs.iter().position(|s| s.ph == Some(Ph::R)).unwrap();
+        let aspiration = ms(prosody::aspiration_ms(&segs, r - 1));
+        assert_eq!(aspiration, 5);
+        assert!(windows[r - 1].1 >= aspiration);
+        assert!(windows[r - 1].1 + windows[r].0 < lens[r]);
+        let segment = &frames[starts[r]..starts[r] + lens[r]];
+        assert!(
+            segment[..aspiration]
+                .iter()
+                .all(|f| f.av == 0.0 && f.ah > 0.0)
+        );
+        assert!(segment[aspiration..].iter().all(|f| f.av > 0.0));
+        assert_eq!(segment[windows[r - 1].1].f, Ph::R.spec().f);
+    }
+
+    #[test]
+    fn short_transition_windows_do_not_overlap_or_escape_segments() {
+        let (mut segs, _, _, _) = frames_for("quick five loud voice");
+        for duration in [5.0, 10.0, 25.0, 60.0, 120.0] {
+            for s in &mut segs {
+                s.dur_ms = duration;
+            }
+            let (_, lens) = frame_layout(&segs);
+            let windows = transition_windows(&segs, &lens);
+            for i in 0..segs.len() {
+                let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
+                let outgoing = windows.get(i).map_or(0, |w| w.0);
+                assert!(incoming + outgoing < lens[i], "{duration} ms: segment {i}");
+            }
+            let frames = build_frames(&segs);
+            assert_eq!(frames.len(), lens.iter().sum::<usize>());
+            assert!(
+                frames
+                    .iter()
+                    .all(|f| f.f0.is_finite() && f.f.iter().all(|v| v.is_finite()))
+            );
+        }
+    }
+
+    #[test]
+    fn diphthongs_reach_and_hold_offglides_before_closure() {
+        for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("voice", Ph::OY)] {
+            let (segs, starts, lens, frames) = frames_for(text);
+            let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
+            let closure = starts[vowel] + lens[vowel] - ms(CLOSURE_AFTER_OFFGLIDE_MS);
+            let offglide = closure - ms(DIPHTHONG_OFFGLIDE_MS);
+            let glide = offglide - ms(DIPHTHONG_GLIDE_MS);
+            let spec = ph.spec();
+            let target = spec.f_end.unwrap();
+            assert_eq!(frames[glide].f, spec.f, "{text}");
+            for (k, fr) in frames[glide..offglide].iter().enumerate() {
+                let expected: [f64; 3] = std::array::from_fn(|j| {
+                    lerp(
+                        spec.f[j],
+                        target[j],
+                        k as f64 / ms(DIPHTHONG_GLIDE_MS) as f64,
+                    )
+                });
+                assert_eq!(fr.f, expected, "{text}: glide frame {k}");
+            }
+            for fr in &frames[offglide..closure] {
+                assert_eq!(fr.f, target, "{text}");
+            }
+            assert_ne!(frames[closure].f, target, "{text}");
+        }
     }
 
     #[test]

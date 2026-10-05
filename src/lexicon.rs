@@ -1,4 +1,4 @@
-//! Exceptions dictionary for function words and common irregular spellings.
+//! Dictionary for function words, irregular spellings and ambiguous inflection roots.
 //! Vowels carry stress digits: 1 primary, 2 secondary, 0 unstressed.
 //! Words whose vowels are all unstressed are treated as function words.
 
@@ -166,6 +166,8 @@ WOMAN W UH1 M AX0 N
 WOMEN W IH1 M IX0 N
 EYE AY1
 BUSY B IH1 Z IY0
+BUS B AH1 S
+GAS G AE1 S
 CITY S IH1 T IY0
 HOUSES HH AW1 Z IH0 Z
 HANGED HH AE1 NG D

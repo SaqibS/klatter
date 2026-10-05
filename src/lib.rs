@@ -57,6 +57,42 @@ mod tests {
     }
 
     #[test]
+    fn normalization_variants_produce_identical_frames() {
+        for (input, equivalent) in [
+            ("don\u{2019}t", "don't"),
+            ("Klatt\u{2019}s", "Klatt's"),
+            (
+                "1,234 people",
+                "one thousand two hundred thirty four people",
+            ),
+            ("-5", "minus five"),
+        ] {
+            assert!(
+                synthesize_frames(input) == synthesize_frames(equivalent),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn unaccented_questions_have_distinct_pitch_tracks() {
+        for word in ["Are you", "Who", "To whom"] {
+            let question = synthesize_frames(&format!("{word}?"));
+            let statement = synthesize_frames(&format!("{word}."));
+            assert_eq!(question.len(), statement.len());
+            assert!(
+                question
+                    .iter()
+                    .zip(&statement)
+                    .any(|(q, s)| q.av > 0.0 && q.f0 > s.f0 + 10.0)
+            );
+            for (q, s) in question.iter().zip(statement) {
+                assert_eq!(klatt::Frame { f0: s.f0, ..*q }, s);
+            }
+        }
+    }
+
+    #[test]
     fn empty_input_is_silent() {
         assert!(synthesize("", DEFAULT_SAMPLE_RATE).iter().all(|&s| s == 0));
     }

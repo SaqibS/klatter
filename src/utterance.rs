@@ -221,6 +221,58 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_plural_pronunciations() {
+        use Ph::*;
+        for (word, expected) in [
+            ("BUSES", vec![B, AH, S, IH, Z]),
+            ("GASES", vec![G, AE, S, IH, Z]),
+            ("LOSES", vec![L, UW, Z, IH, Z]),
+            ("USES", vec![Y, UW, Z, IH, Z]),
+            ("ROSES", vec![R, OW, Z, IH, Z]),
+            ("BOXES", vec![B, AA, K, S, IH, Z]),
+            ("PLACES", vec![P, L, EY, S, IH, Z]),
+            ("HOUSES", vec![HH, AW, Z, IH, Z]),
+        ] {
+            let actual: Vec<Ph> = pronounce(word).into_iter().map(|p| p.0).collect();
+            assert_eq!(actual, expected, "{word}");
+        }
+    }
+
+    #[test]
+    fn inflected_words_preserve_root_stress_and_vowels() {
+        use Ph::*;
+        for (word, expected) in [
+            (
+                "AMAZES",
+                vec![(AX, 0), (M, 0), (EY, 1), (Z, 0), (IH, 0), (Z, 0)],
+            ),
+            (
+                "AMUSES",
+                vec![(AX, 0), (M, 0), (Y, 0), (UW, 1), (Z, 0), (IH, 0), (Z, 0)],
+            ),
+            (
+                "ABUSES",
+                vec![(AX, 0), (B, 0), (Y, 0), (UW, 1), (Z, 0), (IH, 0), (Z, 0)],
+            ),
+        ] {
+            assert_eq!(pronounce(word), expected, "{word}");
+        }
+        for root in [
+            "AMAZE",
+            "AMUSE",
+            "ABUSE",
+            "ARISE",
+            "EXERCISE",
+            "RECOGNIZE",
+            "MOUSE",
+        ] {
+            let mut expected = pronounce(root);
+            expected.extend([(IH, 0), (Z, 0)]);
+            assert_eq!(pronounce(&format!("{root}S")), expected, "{root} + S");
+        }
+    }
+
+    #[test]
     fn syllabifies_with_maximal_onset() {
         let phones: Vec<(Ph, u8)> = [Ph::EH, Ph::K, Ph::S, Ph::T, Ph::R, Ph::AX]
             .iter()

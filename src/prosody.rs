@@ -1,7 +1,7 @@
 //! Prosody: Klatt's (1979) segmental duration rules, as summarized in Klatt
 //! (1987), and a hat-pattern F0 contour with declination and accent peaks.
 
-use crate::phoneme::{Class, Ph};
+use crate::phoneme::{Class, Ph, Place};
 use crate::text::Break;
 use crate::utterance::Seg;
 
@@ -50,8 +50,56 @@ fn postvocalic_factor(segs: &[Seg], i: usize) -> f64 {
     1.0
 }
 
+/// Exclusive end of the acoustic nucleus starting at vowel `i`: the vowel plus
+/// following liquids and glides in the same syllable (Hertz & Huffman 1992).
+pub fn nucleus_end(segs: &[Seg], i: usize) -> usize {
+    let mut j = i + 1;
+    while j < segs.len()
+        && !segs[j - 1].word_final
+        && segs[j].coda
+        && segs[j]
+            .ph
+            .is_some_and(|p| matches!(p.class(), Class::Liquid | Class::Glide))
+    {
+        j += 1;
+    }
+    j
+}
+
+/// Aspiration after the plosive at `i`, or 0 if it isn't aspirated.
+pub fn aspiration_ms(segs: &[Seg], i: usize) -> f64 {
+    let s = &segs[i];
+    let Some(ph) = s.ph else { return 0.0 };
+    let after_s = i > 0 && segs[i - 1].ph == Some(Ph::S) && !s.word_initial;
+    let Some(next) = segs
+        .get(i + 1)
+        .filter(|n| n.ph.is_some_and(Ph::is_sonorant))
+    else {
+        return 0.0;
+    };
+    if !ph.is_plosive() || ph.is_voiced() || after_s {
+        return 0.0;
+    }
+    let ms = if next.stress > 0 && !next.function_word {
+        50.0
+    } else {
+        25.0
+    };
+    if ph.place() == Place::Velar {
+        ms + 10.0
+    } else {
+        ms
+    }
+}
+
+/// Hertz & Huffman (1992): the voiced vowel after aspiration is about 20 ms
+/// shorter than elsewhere, but the aspiration itself adds to the syllable.
+const VOWEL_SHORTENING_AFTER_ASPIRATION_MS: f64 = 20.0;
+
 pub fn assign_durations(segs: &mut [Seg]) {
     let last = segs.len().saturating_sub(1);
+    // The vowel's (percent, minimum), kept so its nucleus can be timed as a whole.
+    let mut vowel_scaling = vec![(1.0, 0.0); segs.len()];
     for i in 0..segs.len() {
         let Some(ph) = segs[i].ph else {
             segs[i].dur_ms = pause_ms(segs[i].brk, i == 0 || i == last);
@@ -129,12 +177,40 @@ pub fn assign_durations(segs: &mut [Seg]) {
             prcnt *= 0.7;
         }
 
-        let mut dur = (inh - min) * prcnt + min;
-        // Rule 11: lengthening for aspiration after a voiceless plosive.
-        if stressed && ph.is_sonorant() && prev.is_some_and(|p| p.is_plosive() && !p.is_voiced()) {
-            dur += 25.0;
+        vowel_scaling[i] = (prcnt, min);
+        segs[i].dur_ms = (inh - min) * prcnt + min;
+    }
+
+    // The vowel's context scales its whole nucleus; coda liquids and glides
+    // keep their own durations and the vowel takes the remainder, so vowel and
+    // coda trade time (Hertz & Huffman 1992).
+    for i in 0..segs.len() {
+        if !segs[i].is_vowel() {
+            continue;
         }
-        segs[i].dur_ms = dur;
+        let end = nucleus_end(segs, i);
+        if end > i + 1 {
+            let (prcnt, vowel_min) = vowel_scaling[i];
+            let stressed = segs[i].stress > 0 && !segs[i].function_word;
+            let (mut inh, mut min, mut coda) = (0.0, 0.0, 0.0);
+            for s in &segs[i..end] {
+                let (h, m) = s.ph.map(Ph::durations).unwrap_or_default();
+                inh += h;
+                min += if stressed { m } else { m / 2.0 };
+            }
+            for s in &segs[i + 1..end] {
+                coda += s.dur_ms;
+            }
+            segs[i].dur_ms = ((inh - min) * prcnt + min - coda).max(vowel_min);
+        }
+    }
+    for i in 1..segs.len() {
+        let asp = aspiration_ms(segs, i - 1);
+        if asp > 0.0 {
+            let floor = segs[i].ph.map_or(0.0, |p| p.durations().1 / 2.0);
+            segs[i].dur_ms =
+                (segs[i].dur_ms + asp - VOWEL_SHORTENING_AFTER_ASPIRATION_MS).max(floor);
+        }
     }
 }
 
@@ -205,8 +281,14 @@ fn clause_contour(
         (TOP_F0 - DECLINATION_PER_SEC * secs).max(BASE_F0)
     };
     let hat_on = accents.first().map(|&k| starts[k]).unwrap_or(end);
+    // Hertz, Younes & Zinovieva (1999) put the accent's high target about 75% of
+    // the way through the nucleus, rising from the middle of the onset.
+    let peak_of = |k: usize| {
+        let e = nucleus_end(segs, k);
+        starts[k] + (starts[e - 1] + lens[e - 1] - starts[k]) * 3 / 4
+    };
     let last_accent = accents.last().copied();
-    let hat_off = last_accent.map(|k| starts[k] + lens[k] / 3).unwrap_or(end);
+    let hat_off = last_accent.map(peak_of).unwrap_or(end);
     let rise = (100.0 / frame_ms) as usize;
     for frame in begin..end {
         let mut v = baseline(frame);
@@ -216,7 +298,7 @@ fn clause_contour(
         f0[frame] = v;
     }
     for &k in &accents {
-        let peak = starts[k] + lens[k] / 3;
+        let peak = peak_of(k);
         let half = lens[k].max(8);
         for frame in peak.saturating_sub(half)..(peak + half).min(end) {
             let w = 1.0 - (frame as f64 - peak as f64).abs() / half as f64;
@@ -307,6 +389,23 @@ mod tests {
         let bead = durations("bead")[1].1;
         let beat = durations("beat")[1].1;
         assert!(bead > beat, "bead {bead} beat {beat}");
+    }
+
+    #[test]
+    fn coda_liquid_takes_time_from_vowel() {
+        let bee = durations("bee");
+        let beer = durations("beer");
+        let vowel = |d: &[(Ph, f64)]| d.iter().find(|(p, _)| p.is_vowel()).unwrap().1;
+        let nucleus: f64 = beer[1..].iter().map(|x| x.1).sum();
+        assert!(vowel(&beer) < vowel(&bee), "{beer:?} {bee:?}");
+        assert!(nucleus > vowel(&bee), "{beer:?} {bee:?}");
+    }
+
+    #[test]
+    fn aspiration_adds_to_syllable_but_shortens_voicing() {
+        let tea = durations("tea")[1].1;
+        let dee = durations("dee")[1].1;
+        assert!(tea > dee && tea - 50.0 < dee, "tea {tea} dee {dee}");
     }
 
     #[test]

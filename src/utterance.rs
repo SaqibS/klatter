@@ -221,6 +221,28 @@ mod tests {
     }
 
     #[test]
+    fn down_and_inflections_keep_the_aw_vowel() {
+        use Ph::*;
+        let root = vec![(D, 0), (AW, 1), (N, 0)];
+        assert_eq!(pronounce("DOWN"), root);
+        for (word, suffix) in [
+            ("DOWNS", vec![(Z, 0)]),
+            ("DOWNED", vec![(D, 0)]),
+            ("DOWNING", vec![(IH, 0), (NG, 0)]),
+        ] {
+            let mut expected = root.clone();
+            expected.extend(suffix);
+            assert_eq!(pronounce(word), expected, "{word}");
+        }
+        let segs = build(&normalize("down"));
+        let phones: Vec<_> = segs.iter().filter_map(|s| s.ph).collect();
+        assert_eq!(phones, vec![D, AW, N]);
+        let vowel = segs.iter().find(|s| s.is_vowel()).unwrap();
+        assert_eq!(vowel.stress, 1);
+        assert!(!vowel.function_word);
+    }
+
+    #[test]
     fn ambiguous_plural_pronunciations() {
         use Ph::*;
         for (word, expected) in [

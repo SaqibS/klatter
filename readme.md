@@ -23,6 +23,18 @@ target\release\klatter in.txt out.wav
 
 The output is a 16 kHz, 16-bit mono WAV file. The library function `klatter::synthesize(text, sample_rate)` also accepts other sample rates. Repeated calls to `klatt::Synth::render` on the same synthesizer preserve both synthesis state and fractional-sample timing, so rendering frames in chunks produces the same samples as rendering them together. The project uses no third-party crates.
 
+### Voice profiles
+
+```
+target\release\klatter --voice light --timing compact-holds in.txt out.wav
+```
+
+`--voice original` is the default. The opt-in `light` voice uses a shorter-tract approximation: tract resonance frequencies are multiplied by 1.22 and bandwidths by 1.30. This includes F1-F5 in the cascade, parallel frication resonances through F6, open-glottis F1 adjustments, and nasal/tracheal pole-zero filters. Broader bandwidths reduce resonance ringing; scaling both branches keeps vowels and consonants in the same voice. The existing sample-rate-dependent resonance bypass still applies near Nyquist.
+
+Pitch periods, glottal shape, spectral tilt, source amplitudes and noise generation are unchanged. This is a tract-profile change, not pitch shifting, resampling or added breathiness. It is intended to produce a distinctly lighter resonance pattern; perceived quality still requires listening. Pronunciation, timing and contextual-trajectory options remain independent, with original trajectories selected by default.
+
+Use `klatt::Synth::with_voice(sample_rate, klatt::Voice::Light)` to render the same frames with the new profile, or `synthesize_with_voice(text, sample_rate, timing, trajectory, voice)` for normalized PCM. Existing library entry points retain the original voice. CLI output is peak-normalized; controlled voice comparisons should match playback level separately.
+
 ### Compact vowel holds
 
 ```
@@ -42,6 +54,20 @@ Relevant sources for further general rules:
 - [Festival duration module](https://github.com/festvox/festival/blob/master/lib/duration.scm): both hand-written Klatt rules and CART-based duration models, including phone-normalized log-duration predictions. Klatter does not use a learned duration model.
 - [CMUdict](https://github.com/cmusphinx/cmudict): a broad English pronunciation reference for evaluating phoneme sequences and stress. It is not a duration or acoustic-trajectory model, and its maintainers explicitly caution that entries can contain errors. It is not bundled here.
 
+### Experimental contextual vowel trajectories
+
+```
+target\release\klatter --timing compact-holds --trajectory contextual in.txt out.wav
+```
+
+`--trajectory original` is the default. Contextual trajectories change only F1-F3 inside voiced monophthongs. A two-sided exponential target-approach curve uses the vowel's existing target and its first/last voiced formant values, which already reflect adjacent sounds. A shared 40 ms time constant lets longer vowels approach their targets more closely than shorter vowels. The curve is blended 65% with the original trajectory to limit undershoot. These are experimental modeling choices, not recovered Eloquence parameters or a demonstrated quality improvement.
+
+The first and last voiced frames, aspiration, consonants, diphthong trajectories, formant bandwidths and all source/pitch controls remain unchanged. Timing compaction is completed before the trajectory change, so adding formant movement cannot remove the accepted shortening or change the frame count. Neighbour influence follows vowel duration and acoustic boundary values, not word names; there is no random movement. When both boundaries already equal the vowel target, the model introduces no movement.
+
+The experiment draws on the target-undershoot hypothesis associated with [Lindblom's study of vowel reduction](https://doi.org/10.1121/1.1918816), and the phone-edge/context distinction in Hertz's model. It is not a reproduction of either model; vowel undershoot is not a universal requirement, and intelligibility must be assessed by listening.
+
+Use `synthesize_frames_with_options(text, timing, params::Trajectory::Contextual)` or `synthesize_with_options(text, sample_rate, timing, params::Trajectory::Contextual)`. Existing timing-only APIs retain the original trajectories. The options are independent; both timing and trajectory must be selected to use compact holds with contextual movement.
+
 ## Pipeline
 
 1. `text.rs` normalizes the text. It expands numbers, years, ordinals, money, percentages and common abbreviations, spells out acronyms, and splits clauses at punctuation. Typographic apostrophes are normalized before word splitting. Negative numbers retain their sign, and numbers with thousands separators are read as quantities rather than years.
@@ -55,6 +81,14 @@ Relevant sources for further general rules:
 ## Regression coverage
 
 Regression tests cover consonant-cluster shortening, terminal intonation in unaccented clauses, aspiration and offglide timing, typographic apostrophes, grouped and negative numbers, plural roots and stress preservation, the AW vowel in DOWN and its inflections, and incremental rendering at fractional samples per frame. Rendering chunk sizes are checked for exact waveform equivalence. These checks establish correctness of the specified behaviors, not perceived voice quality.
+
+## Voice metrics
+
+```
+python tools\voice_metrics.py reference.wav candidate.wav
+```
+
+Compares a rendering against a reference recording of the same text using metrics that do not depend on speaking rate: F0 distribution, H1-H2, median F1-F3, pause frequency and length, and long-term spectrum bands relative to 250-500 Hz. Each difference is expressed in tolerances, and the score is their root mean square (0 means a match). Worst mismatches are listed first. Requires Python with numpy, and 16-bit WAV at 16 kHz or above.
 
 ## Known limitations
 

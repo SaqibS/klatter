@@ -8,8 +8,10 @@ use crate::utterance::Seg;
 pub fn pause_ms(brk: Option<Break>, utterance_edge: bool) -> f64 {
     match brk {
         _ if utterance_edge => 150.0,
-        Some(Break::Comma) => 250.0,
-        Some(_) => 500.0,
+        // Pauses are kept short; boundaries are carried
+        // mainly by pitch and final lengthening.
+        Some(Break::Comma) => 100.0,
+        Some(_) => 200.0,
         None => 150.0,
     }
 }
@@ -96,6 +98,21 @@ pub fn aspiration_ms(segs: &[Seg], i: usize) -> f64 {
 /// shorter than elsewhere, but the aspiration itself adds to the syllable.
 const VOWEL_SHORTENING_AFTER_ASPIRATION_MS: f64 = 20.0;
 
+/// Syllables are kept evenly timed: stressed vowels are shorter than
+/// Klatt's rules give, which avoids a drawl on content words, while unstressed
+/// syllables of content words stay audible instead of being swallowed.
+const STRESSED_VOWEL_FACTOR: f64 = 0.65;
+const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.4;
+
+/// Stop closures and fricatives are about 20% shorter than
+/// Klatt's, which keeps consonants crisp and the rhythm vowel-led.
+const OBSTRUENT_FACTOR: f64 = 0.8;
+
+/// Klatt's value is 1.4, but final vowels already escape non-final shortening
+/// and get the full postvocalic effect, so 1.4 drawls them; boundaries
+/// get only mild lengthening.
+const PHRASE_FINAL_LENGTHENING: f64 = 1.0;
+
 pub fn assign_durations(segs: &mut [Seg]) {
     let last = segs.len().saturating_sub(1);
     // The vowel's (percent, minimum), kept so its nucleus can be timed as a whole.
@@ -113,7 +130,7 @@ pub fn assign_durations(segs: &mut [Seg]) {
 
         // Rule 2: clause-final lengthening of the final syllable's nucleus and coda.
         if s.phrase_final && (vowel || s.coda) {
-            prcnt *= 1.4;
+            prcnt *= PHRASE_FINAL_LENGTHENING;
         }
         // Rule 3: non-phrase-final shortening.
         if vowel && !s.phrase_final {
@@ -147,6 +164,12 @@ pub fn assign_durations(segs: &mut [Seg]) {
             } else {
                 0.7
             };
+            if vowel && !s.function_word {
+                prcnt *= UNSTRESSED_CONTENT_VOWEL_FACTOR;
+            }
+        }
+        if vowel && stressed {
+            prcnt *= STRESSED_VOWEL_FACTOR;
         }
         // Rule 9: postvocalic context, strongest at phrase ends.
         if vowel {
@@ -172,6 +195,12 @@ pub fn assign_durations(segs: &mut [Seg]) {
 
         vowel_scaling[i] = (prcnt, min);
         segs[i].dur_ms = (inh - min) * prcnt + min;
+        if matches!(
+            ph.class(),
+            Class::Stop | Class::Fricative | Class::Affricate
+        ) {
+            segs[i].dur_ms *= OBSTRUENT_FACTOR;
+        }
     }
 
     // The vowel's context scales its whole nucleus; coda liquids and glides
@@ -207,10 +236,10 @@ pub fn assign_durations(segs: &mut [Seg]) {
     }
 }
 
-const TOP_F0: f64 = 130.0;
-const BASE_F0: f64 = 100.0;
+const TOP_F0: f64 = 120.0;
+const BASE_F0: f64 = 93.0;
 const FLOOR_F0: f64 = 78.0;
-const HAT_RISE: f64 = 18.0;
+const HAT_RISE: f64 = 12.0;
 const ACCENT: f64 = 10.0;
 const DECLINATION_PER_SEC: f64 = 10.0;
 
@@ -319,7 +348,7 @@ fn clause_contour(
                 if t < 0.6 {
                     top + (dip - top) * (t / 0.6)
                 } else {
-                    dip + 20.0 * (t - 0.6) / 0.4
+                    dip + 12.0 * (t - 0.6) / 0.4
                 }
             }
             Break::Question => {
@@ -327,7 +356,7 @@ fn clause_contour(
                 if t < 0.4 {
                     top + (low - top) * (t / 0.4)
                 } else {
-                    low + 60.0 * ((t - 0.4) / 0.6).powf(1.5)
+                    low + 35.0 * ((t - 0.4) / 0.6).powf(1.5)
                 }
             }
         };
@@ -378,7 +407,7 @@ mod tests {
             .filter(|(p, _)| p.is_vowel())
             .map(|x| x.1)
             .collect();
-        assert!(vowels[1] > vowels[0] * 1.3, "{vowels:?}");
+        assert!(vowels[1] > vowels[0] * 1.05, "{vowels:?}");
     }
 
     #[test]
@@ -431,7 +460,7 @@ mod tests {
         let d = durations("extra cat");
         let s = d.iter().find(|(p, _)| *p == Ph::S).unwrap().1;
         let (inh, min) = Ph::S.durations();
-        let expected = (inh - min) * 0.85 * 0.5 + min;
+        let expected = ((inh - min) * 0.85 * 0.5 + min) * OBSTRUENT_FACTOR;
         assert!((s - expected).abs() < 1e-9, "{s} vs {expected}");
     }
 
@@ -446,7 +475,7 @@ mod tests {
                 .1
         };
         let (inh, min) = Ph::T.durations();
-        let final_t = (inh - min) * 1.4 * 0.85 + min;
+        let final_t = ((inh - min) * PHRASE_FINAL_LENGTHENING * 0.85 + min) * OBSTRUENT_FACTOR;
         assert!((last_t("act") - final_t).abs() < 1e-9);
         assert!((last_t("act. cat") - final_t).abs() < 1e-9);
         let first_t = |text: &str| {

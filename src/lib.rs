@@ -25,23 +25,14 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 const PEAK: f64 = 0.89 * i16::MAX as f64;
 
 pub fn synthesize_frames(input: &str) -> Vec<klatt::Frame> {
-    synthesize_frames_with_timing(input, params::Timing::Original)
-}
-
-pub fn synthesize_frames_with_timing(input: &str, timing: params::Timing) -> Vec<klatt::Frame> {
     let tokens = text::normalize(input);
     let mut segs = utterance::build(&tokens);
     prosody::assign_durations(&mut segs);
-    params::build_frames_with_timing(&segs, timing)
+    params::build_frames(&segs)
 }
 
 pub fn synthesize(input: &str, sample_rate: u32) -> Vec<i16> {
-    synthesize_with_timing(input, sample_rate, params::Timing::Original)
-}
-
-/// Synthesizes speech with the selected vowel timing policy.
-pub fn synthesize_with_timing(input: &str, sample_rate: u32, timing: params::Timing) -> Vec<i16> {
-    let frames = synthesize_frames_with_timing(input, timing);
+    let frames = synthesize_frames(input);
     let raw = klatt::Synth::new(sample_rate).render(&frames);
     let peak = raw.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     let scale = if peak > 0.0 { PEAK / peak } else { 0.0 };

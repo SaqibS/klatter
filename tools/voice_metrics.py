@@ -74,7 +74,12 @@ def pitch(fr, sr):
     lo, hi = int(sr / 300), int(sr / 60)
     lag = lo + np.argmax(ac[:, lo:hi], axis=1)
     strength = ac[np.arange(len(lag)), lag]
-    return sr / lag, strength > 0.5
+    f0 = sr / lag
+    # Autocorrelation makes isolated octave errors; true pitch moves smoothly.
+    padded = np.pad(f0, 5, mode="edge")
+    local = np.median(np.lib.stride_tricks.sliding_window_view(padded, 11), axis=1)
+    smooth = np.abs(np.log2(f0 / local)) < 0.4
+    return f0, (strength > 0.5) & smooth
 
 
 def h1_h2(fr, sr, f0):

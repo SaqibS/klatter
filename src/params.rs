@@ -8,6 +8,14 @@ use crate::utterance::Seg;
 
 const ASPIRATION_DB: f64 = 55.0;
 const VOICE_BAR_DB: f64 = 47.0;
+/// /h/ is mostly voiced, with noise on top, rather than pure noise.
+const HH_AV_DB: f64 = 52.0;
+const HH_AH_DB: f64 = 55.0;
+/// Sounds change over about 25 ms; switching voicing or
+/// frication within one 5 ms frame sounds like clips spliced together.
+const CROSS_FADE_FRAMES: usize = 5;
+/// Fades run from this inaudible level so they span only the audible range.
+const FADE_FLOOR_DB: f64 = 30.0;
 const NASAL_ZERO_HZ: f64 = 450.0;
 
 /// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
@@ -25,14 +33,6 @@ const OFFSET_AV_DROP_DB: f64 = 10.0;
 const OFFSET_RAMP_MS: f64 = 100.0;
 const VOICELESS_RAMP_MS: f64 = 80.0;
 const VOICELESS_PEAK: f64 = 0.8;
-
-/// Vowel timing policy; the default keeps the original duration rules.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Timing {
-    #[default]
-    Original,
-    CompactHolds,
-}
 
 /// How strongly a segment imposes its formant targets on its neighbours.
 fn dominance(p: Option<Ph>) -> u8 {
@@ -72,8 +72,18 @@ const RELEASE_AFTER_FRICATIVE_MS: f64 = 30.0;
 const RELEASE_AFTER_ASPIRATION_MS: f64 = 70.0;
 const CLOSURE_AFTER_OFFGLIDE_MS: f64 = 15.0;
 const DIPHTHONG_GLIDE_MS: f64 = 80.0;
-const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
+/// The AY and AW glide finishes about 70% of the way through the
+/// vowel and holds the end quality, rather than gliding until the last moment.
+const DIPHTHONG_OFFGLIDE_MS: f64 = 50.0;
 const MIN_ONSET_MS: f64 = 30.0;
+/// Transitions take about half the time these rules give;
+/// with short, evenly timed vowels, full-length transitions leave vowels
+/// drifting toward their neighbours instead of holding their quality.
+const TRANSITION_SCALE: f64 = 0.5;
+
+fn scale_transition(frames: usize) -> usize {
+    (frames as f64 * TRANSITION_SCALE).round() as usize
+}
 
 fn is_obstruent(p: Ph) -> bool {
     matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
@@ -115,6 +125,7 @@ fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
 fn transition_windows(segs: &[Seg], lens: &[usize]) -> Vec<(usize, usize)> {
     let mut windows: Vec<(usize, usize)> = (0..segs.len().saturating_sub(1))
         .map(|i| transition_window(segs, i).unwrap_or((0, 0)))
+        .map(|(before, after)| (scale_transition(before), scale_transition(after)))
         .collect();
     for i in 0..segs.len() {
         let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
@@ -157,7 +168,7 @@ fn targets(ph: Ph, len: usize) -> Vec<Formants> {
     let spec = ph.spec();
     let frames = |ms: f64| ms / FRAME_MS;
     // Hertz, Younes & Zinovieva (1999): AY, AW and OY are vowel plus glide, with
-    // a fixed glide transition and a brief offglide; the onset vowel takes the
+    // a fixed glide transition and an offglide hold; the onset vowel takes the
     // rest. Short ones and the one-phone diphthongs scale proportionally.
     let fixed = matches!(ph, Ph::AY | Ph::AW | Ph::OY)
         && len as f64 >= frames(DIPHTHONG_GLIDE_MS + DIPHTHONG_OFFGLIDE_MS + MIN_ONSET_MS);
@@ -320,12 +331,6 @@ fn apply_voice_quality(fr: &mut Frame, b: f64, offset: f64) {
 }
 
 pub fn build_frames(segs: &[Seg]) -> Vec<Frame> {
-    build_frames_with_timing(segs, Timing::Original)
-}
-
-/// Compact timing resamples holds after the baseline layout is constructed;
-/// `Seg::dur_ms` and `frame_layout` continue to describe the original timeline.
-pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
     let (starts, lens) = frame_layout(segs);
     let formants = formant_tracks(segs, &starts, &lens);
     let f0 = prosody::f0_contour(segs, &starts, &lens, FRAME_MS);
@@ -362,7 +367,8 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
             }
             Class::Aspirate => {
                 for fr in &mut frames[range] {
-                    fr.ah = 60.0;
+                    fr.av = HH_AV_DB;
+                    fr.ah = HH_AH_DB;
                 }
             }
             Class::Stop | Class::Affricate => {
@@ -374,7 +380,9 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
                 let closure = len - release;
                 for (k, fr) in frames[range].iter_mut().enumerate() {
                     if k < closure {
-                        fr.avs = if ph.is_voiced() { VOICE_BAR_DB } else { 0.0 };
+                        // Even voiceless closures carry a low murmur so
+                        // phrases flow without dead gaps.
+                        fr.avs = VOICE_BAR_DB;
                     } else {
                         fr.av = spec.av;
                         fr.af = spec.af;
@@ -388,6 +396,8 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
             }
         }
     }
+
+    cross_fade(segs, &starts, &lens, &mut frames);
 
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
@@ -411,147 +421,57 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
             }
         }
     }
-    match timing {
-        Timing::Original => frames,
-        Timing::CompactHolds => compact_holds(segs, &starts, &lens, &formants, &frames),
-    }
+    frames
 }
 
-fn interpolate_frame(a: Frame, b: Frame, t: f64) -> Frame {
-    Frame {
-        f0: lerp(a.f0, b.f0, t),
-        av: lerp(a.av, b.av, t),
-        oq: lerp(a.oq, b.oq, t),
-        tl: lerp(a.tl, b.tl, t),
-        di: lerp(a.di, b.di, t),
-        avs: lerp(a.avs, b.avs, t),
-        ah: lerp(a.ah, b.ah, t),
-        af: lerp(a.af, b.af, t),
-        ab: lerp(a.ab, b.ab, t),
-        f: std::array::from_fn(|j| lerp(a.f[j], b.f[j], t)),
-        b: std::array::from_fn(|j| lerp(a.b[j], b.b[j], t)),
-        df1: lerp(a.df1, b.df1, t),
-        db1: lerp(a.db1, b.db1, t),
-        fnz: lerp(a.fnz, b.fnz, t),
-        ftp: lerp(a.ftp, b.ftp, t),
-        btp: lerp(a.btp, b.btp, t),
-        ftz: lerp(a.ftz, b.ftz, t),
-        btz: lerp(a.btz, b.btz, t),
-        a: std::array::from_fn(|j| lerp(a.a[j], b.a[j], t)),
-    }
-}
-
-fn longest_hold(formants: &[Formants], start: usize, end: usize) -> std::ops::Range<usize> {
-    let mut longest = start..start;
-    let mut begin = start;
-    for k in start..end {
-        if k + 1 == end || formants[k].f != formants[k + 1].f || formants[k].b != formants[k + 1].b
-        {
-            if k + 1 - begin > longest.len() {
-                longest = begin..k + 1;
-            }
-            begin = k + 1;
+/// Smooths voicing and fricative noise across segment boundaries. Stop and
+/// affricate bursts stay abrupt because their sharpness is the cue.
+fn cross_fade(segs: &[Seg], starts: &[usize], lens: &[usize], frames: &mut [Frame]) {
+    let mut fricative = vec![false; frames.len()];
+    for i in 0..segs.len() {
+        if segs[i].ph.is_some_and(|p| p.class() == Class::Fricative) {
+            fricative[starts[i]..starts[i] + lens[i]].fill(true);
         }
     }
-    longest
-}
-
-fn retained_hold_frames(hold: usize, vowel: usize, floor: usize) -> usize {
-    // Only excess dwell time is elastic; short targets and contrastive vowel
-    // minima must survive.
-    let knee = ms(20.0);
-    let excess = hold.saturating_sub(knee);
-    let remove = ((excess as f64 * 0.75).round() as usize).min(vowel.saturating_sub(floor));
-    hold - remove
-}
-
-fn hold_sampling_positions(frames: &[Frame], retained: usize) -> Vec<f64> {
-    if retained == frames.len() {
-        return (0..frames.len()).map(|k| k as f64).collect();
-    }
-    // A continuous time map can still turn a gentle pitch fall into a rapid
-    // one. Spend more of the retained time where pitch is moving quickly.
-    let max_step = frames
-        .windows(2)
-        .map(|w| (w[1].f0 - w[0].f0).abs())
-        .fold(0.0, f64::max);
-    let rate_limit = max_step.max(3.0);
-    let base = (retained - 1) as f64 / (frames.len() - 1) as f64;
-    let mut clock = vec![0.0];
-    for pair in frames.windows(2) {
-        clock.push(clock.last().unwrap() + base.max((pair[1].f0 - pair[0].f0).abs() / rate_limit));
-    }
-    let total = *clock.last().unwrap();
-    let count = (total.ceil() as usize + 1).max(retained).min(frames.len());
-    let mut left = 0;
-    (0..count)
-        .map(|k| {
-            if k == 0 {
-                return 0.0;
-            }
-            if k + 1 == count {
-                return (frames.len() - 1) as f64;
-            }
-            let time = k as f64 * total / (count - 1) as f64;
-            while clock[left + 1] < time {
-                left += 1;
-            }
-            left as f64 + (time - clock[left]) / (clock[left + 1] - clock[left])
-        })
-        .collect()
-}
-
-fn compact_holds(
-    segs: &[Seg],
-    starts: &[usize],
-    lens: &[usize],
-    formants: &[Formants],
-    frames: &[Frame],
-) -> Vec<Frame> {
-    let mut result = Vec::with_capacity(frames.len());
-    for (i, seg) in segs.iter().enumerate() {
-        let start = starts[i];
-        let end = start + lens[i];
-        let Some(ph) = seg.ph.filter(|ph| ph.is_vowel()) else {
-            result.extend_from_slice(&frames[start..end]);
-            continue;
-        };
-        let aspiration = if i > 0 {
-            aspiration_frames(segs, i - 1, lens[i])
-        } else {
-            0
-        };
-        let hold = longest_hold(formants, start + aspiration, end);
-        let stressed = seg.stress > 0 && !seg.function_word;
-        let minimum = ph.durations().1 / if stressed { 1.0 } else { 2.0 };
-        let floor = aspiration + (minimum / FRAME_MS).ceil() as usize;
-        let positions = hold_sampling_positions(
-            &frames[hold.clone()],
-            retained_hold_frames(hold.len(), lens[i], floor),
-        );
-        let retained = positions.len();
-        if retained == hold.len() {
-            result.extend_from_slice(&frames[start..end]);
-            continue;
+    let half = CROSS_FADE_FRAMES / 2;
+    let smooth = |track: Vec<f64>| -> Vec<f64> {
+        (0..track.len())
+            .map(|k| {
+                let window = &track[k.saturating_sub(half)..(k + half + 1).min(track.len())];
+                let mean =
+                    window.iter().map(|v| v.max(FADE_FLOOR_DB)).sum::<f64>() / window.len() as f64;
+                if mean > FADE_FLOOR_DB + 0.5 {
+                    mean
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
+    let av = smooth(frames.iter().map(|f| f.av).collect());
+    let noise = smooth(
+        frames
+            .iter()
+            .zip(&fricative)
+            .map(|(f, &m)| if m { f.af } else { 0.0 })
+            .collect(),
+    );
+    for k in 0..frames.len() {
+        frames[k].av = av[k];
+        if fricative[k] {
+            frames[k].af = noise[k];
+        } else if noise[k] > 0.0 && frames[k].af == 0.0 {
+            // The fading tail keeps the spectrum of the fricative it belongs to.
+            let source = (1..=half)
+                .flat_map(|d| [k.checked_sub(d), Some(k + d)])
+                .flatten()
+                .find(|&j| j < frames.len() && fricative[j])
+                .unwrap();
+            frames[k].af = noise[k];
+            frames[k].ab = frames[source].ab;
+            frames[k].a = frames[source].a;
         }
-        result.extend_from_slice(&frames[start..hold.start]);
-        // Sampling the whole hold keeps its endpoints and avoids a jump in F0
-        // or source envelopes even when only the formants are stationary.
-        for (k, &position) in positions.iter().enumerate() {
-            if k == 0 {
-                result.push(frames[hold.start]);
-            } else if k + 1 == retained {
-                result.push(frames[hold.end - 1]);
-            } else {
-                let left = position.floor() as usize;
-                let a = frames[hold.start + left];
-                let b = frames[hold.start + left + 1];
-                result.push(interpolate_frame(a, b, position - left as f64));
-            }
-        }
-        result.extend_from_slice(&frames[hold.end..end]);
     }
-    result
 }
 
 #[cfg(test)]
@@ -570,216 +490,27 @@ mod tests {
     }
 
     #[test]
+    fn voicing_fades_into_stop_closure_but_burst_stays_sharp() {
+        let (segs, starts, _, frames) = frames_for("at");
+        let t = segs.iter().position(|s| s.ph == Some(Ph::T)).unwrap();
+        let closure = starts[t];
+        for k in closure - 2..closure + 3 {
+            let step = frames[k - 1].av.max(FADE_FLOOR_DB) - frames[k].av.max(FADE_FLOOR_DB);
+            assert!(
+                step < 15.0,
+                "frame {k}: {} -> {}",
+                frames[k - 1].av,
+                frames[k].av
+            );
+        }
+        let burst = frames[closure..].iter().position(|f| f.af > 0.0).unwrap() + closure;
+        assert_eq!(frames[burst - 1].af, 0.0);
+    }
+
+    #[test]
     fn layout_covers_all_frames() {
         let (_, starts, lens, frames) = frames_for("Hello there, how are you?");
         assert_eq!(starts.last().unwrap() + lens.last().unwrap(), frames.len());
-    }
-
-    #[test]
-    fn compact_holds_preserve_other_segments_and_moving_transitions() {
-        for text in [
-            "Alice was beginning to get very tired.",
-            "The bank is on the other side. Keep that in mind.",
-            "Way down in the well, the bookshelves were empty.",
-            "The rain moved slowly over the hills.",
-            "Please put the blue suitcase beside the door.",
-            "Five loud boys try tea. A quick voice. Who?",
-        ] {
-            let (segs, starts, lens, baseline) = frames_for(text);
-            assert_eq!(baseline, build_frames_with_timing(&segs, Timing::Original));
-            let tracks = formant_tracks(&segs, &starts, &lens);
-            let compact = build_frames_with_timing(&segs, Timing::CompactHolds);
-            let mut offset = 0;
-            for (i, seg) in segs.iter().enumerate() {
-                let start = starts[i];
-                let end = start + lens[i];
-                let Some(ph) = seg.ph.filter(|ph| ph.is_vowel()) else {
-                    assert_eq!(
-                        &compact[offset..offset + lens[i]],
-                        &baseline[start..end],
-                        "{text}: {i}"
-                    );
-                    offset += lens[i];
-                    continue;
-                };
-                let aspiration = if i > 0 {
-                    aspiration_frames(&segs, i - 1, lens[i])
-                } else {
-                    0
-                };
-                let hold = longest_hold(&tracks, start + aspiration, end);
-                let min = ph.durations().1
-                    / if seg.stress > 0 && !seg.function_word {
-                        1.0
-                    } else {
-                        2.0
-                    };
-                let floor = aspiration + (min / FRAME_MS).ceil() as usize;
-                let retained = hold_sampling_positions(
-                    &baseline[hold.clone()],
-                    retained_hold_frames(hold.len(), lens[i], floor),
-                )
-                .len();
-                let new_len = lens[i] - hold.len() + retained;
-                assert!(new_len >= floor.min(lens[i]), "{text}: {ph:?}");
-                let actual = &compact[offset..offset + new_len];
-                let prefix = hold.start - start;
-                assert_eq!(&actual[..prefix], &baseline[start..hold.start]);
-                assert_eq!(&actual[prefix + retained..], &baseline[hold.end..end]);
-                assert_eq!(actual.first(), baseline[start..end].first());
-                assert_eq!(actual.last(), baseline[start..end].last());
-                if retained > 0 {
-                    assert_eq!(actual[prefix], baseline[hold.start]);
-                    assert_eq!(actual[prefix + retained - 1], baseline[hold.end - 1]);
-                }
-                offset += new_len;
-            }
-            assert_eq!(offset, compact.len());
-            assert!(compact.len() < baseline.len(), "{text}");
-            assert!(compact.iter().all(|f| f.f0.is_finite()
-                && f.av.is_finite()
-                && f.f.iter().chain(&f.b).all(|v| v.is_finite())));
-        }
-    }
-
-    #[test]
-    fn elastic_hold_rule_is_monotonic_and_does_not_lengthen_short_vowels() {
-        for floor in [0, 10, 20, 30, 50] {
-            let mut previous = 0;
-            for hold in 0..200 {
-                let vowel = hold + 10;
-                let retained = retained_hold_frames(hold, vowel, floor);
-                let length = vowel - hold + retained;
-                assert!(retained <= hold);
-                assert!(length >= previous);
-                assert!(length >= vowel.min(floor));
-                if hold <= ms(20.0) {
-                    assert_eq!(retained, hold);
-                }
-                previous = length;
-            }
-        }
-    }
-
-    #[test]
-    fn compact_pitch_safeguard_preserves_fast_contours_without_new_large_steps() {
-        for step in [0.0, 0.5, 1.5, 3.0, 4.0] {
-            let frames: Vec<_> = (0..40)
-                .map(|i| Frame {
-                    f0: 250.0 - i as f64 * step,
-                    ..Frame::default()
-                })
-                .collect();
-            let positions = hold_sampling_positions(&frames, 10);
-            let retained = positions.len();
-            let actual_step = 39.0 * step / (retained - 1) as f64;
-            assert!(actual_step <= step.max(3.0) + 1e-12);
-            assert!((10..=40).contains(&retained));
-            if step >= 3.0 {
-                assert_eq!(retained, frames.len());
-            }
-        }
-        let frames: Vec<_> = (0..40)
-            .map(|i| Frame {
-                f0: 140.0 - (i as f64 - 20.0).max(0.0) * 2.5,
-                ..Frame::default()
-            })
-            .collect();
-        let positions = hold_sampling_positions(&frames, 10);
-        assert!(
-            positions.len() <= 25,
-            "a local fall must not prevent shortening the flat part"
-        );
-        assert_eq!(positions[0], 0.0);
-        assert_eq!(*positions.last().unwrap(), 39.0);
-        let pitch: Vec<_> = positions
-            .iter()
-            .map(|&p| {
-                let left = p.floor() as usize;
-                lerp(
-                    frames[left].f0,
-                    frames[(left + 1).min(39)].f0,
-                    p - left as f64,
-                )
-            })
-            .collect();
-        assert!(positions.windows(2).all(|w| w[1] > w[0]));
-        assert!(pitch.windows(2).all(|w| (w[1] - w[0]).abs() <= 3.0 + 1e-12));
-    }
-
-    #[test]
-    fn compact_holds_resample_source_envelopes_instead_of_splicing_them() {
-        let (mut segs, _, _, _) = frames_for("saw");
-        let vowel = segs.iter().position(|s| s.is_vowel()).unwrap();
-        segs[vowel].dur_ms = 300.0;
-        let (starts, lens) = frame_layout(&segs);
-        let old = build_frames(&segs);
-        let new = build_frames_with_timing(&segs, Timing::CompactHolds);
-        let removed = old.len() - new.len();
-        assert!(removed >= ms(100.0));
-        let a = &old[starts[vowel]..starts[vowel] + lens[vowel]];
-        let b = &new[starts[vowel]..starts[vowel] + lens[vowel] - removed];
-        assert_eq!(a.first(), b.first());
-        assert_eq!(a.last(), b.last());
-        assert!(a.iter().any(|f| f.oq != a[0].oq));
-        let low = a.iter().map(|f| f.oq).fold(f64::INFINITY, f64::min);
-        let high = a.iter().map(|f| f.oq).fold(f64::NEG_INFINITY, f64::max);
-        assert!(b.iter().all(|f| f.oq >= low && f.oq <= high));
-        let tracks = formant_tracks(&segs, &starts, &lens);
-        let hold = longest_hold(&tracks, starts[vowel], starts[vowel] + lens[vowel]);
-        let retained = hold.len() - removed;
-        let max_step = old[hold.clone()]
-            .windows(2)
-            .map(|w| (w[1].oq - w[0].oq).abs())
-            .fold(0.0, f64::max);
-        let positions = hold_sampling_positions(
-            &old[hold.clone()],
-            retained_hold_frames(hold.len(), lens[vowel], ms(Ph::AO.durations().1)),
-        );
-        let resampling_step = positions
-            .windows(2)
-            .map(|w| w[1] - w[0])
-            .fold(0.0, f64::max);
-        let local = hold.start - starts[vowel];
-        assert!(
-            b[local..local + retained]
-                .windows(2)
-                .all(|w| (w[1].oq - w[0].oq).abs() <= max_step * resampling_step + 1e-9)
-        );
-    }
-
-    #[test]
-    fn compact_holds_do_not_shorten_diphthong_glides() {
-        for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("voice", Ph::OY)] {
-            let (segs, starts, lens, old) = frames_for(text);
-            let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
-            let new = build_frames_with_timing(&segs, Timing::CompactHolds);
-            let removed = old.len() - new.len();
-            assert!(removed >= ms(30.0));
-            let closure = starts[vowel] + lens[vowel] - ms(CLOSURE_AFTER_OFFGLIDE_MS);
-            let glide = closure - ms(DIPHTHONG_OFFGLIDE_MS + DIPHTHONG_GLIDE_MS);
-            assert_eq!(
-                &old[glide..closure],
-                &new[glide - removed..closure - removed],
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn compact_empty_and_tiny_segments_remain_valid() {
-        assert!(build_frames_with_timing(&[], Timing::CompactHolds).is_empty());
-        let (mut segs, _, _, _) = frames_for("try a quick voice");
-        for duration in [5.0, 10.0, 25.0, 60.0] {
-            for seg in &mut segs {
-                seg.dur_ms = duration;
-            }
-            let old = build_frames(&segs);
-            let new = build_frames_with_timing(&segs, Timing::CompactHolds);
-            assert!(new.len() <= old.len());
-            let audio = crate::klatt::Synth::new(22050).render(&new);
-            assert!(audio.iter().all(|s| s.is_finite()));
-        }
     }
 
     #[test]
@@ -817,11 +548,11 @@ mod tests {
     fn release_transition_can_use_more_than_half_the_segment() {
         let (mut segs, _, _, _) = frames_for("tea");
         let vowel = segs.iter().position(|s| s.ph == Some(Ph::IY)).unwrap();
-        segs[vowel].dur_ms = 100.0;
+        segs[vowel].dur_ms = 50.0;
         let (starts, lens) = frame_layout(&segs);
         let frames = build_frames(&segs);
         let start = starts[vowel];
-        let release = ms(RELEASE_AFTER_ASPIRATION_MS);
+        let release = scale_transition(ms(RELEASE_AFTER_ASPIRATION_MS));
         assert!(release > lens[vowel] / 2);
         let target = Ph::IY.spec().f;
         assert_ne!(frames[start + release - 1].f, target);
@@ -883,7 +614,8 @@ mod tests {
         for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("voice", Ph::OY)] {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
-            let closure = starts[vowel] + lens[vowel] - ms(CLOSURE_AFTER_OFFGLIDE_MS);
+            let closure =
+                starts[vowel] + lens[vowel] - scale_transition(ms(CLOSURE_AFTER_OFFGLIDE_MS));
             let offglide = closure - ms(DIPHTHONG_OFFGLIDE_MS);
             let glide = offglide - ms(DIPHTHONG_GLIDE_MS);
             let spec = ph.spec();

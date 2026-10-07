@@ -31,6 +31,7 @@ const RULES: &str = r"
  |AL|#|AX L
 |AGAIN||AX G EH N
 #:|AG|E|IH JH
+|A|STE |EY
 |A|^%|EY
 |A|^+:#|AE
  :|A|^+ |EY
@@ -336,6 +337,7 @@ G|U|#|W
 |V||V
 
  |WERE||W ER
+|WA|STE |W EY
 |WA|S|W AA
 |WA|T|W AA
 |WHERE||W EH R
@@ -616,6 +618,10 @@ mod tests {
         assert_eq!(pron("DOGS"), "D AA G Z");
         assert_eq!(pron("SIT"), "S IH T");
         assert_eq!(pron("KNIGHT"), "N AY T");
+        assert_eq!(pron("TASTE"), "T EY S T");
+        assert_eq!(pron("WASTE"), "W EY S T");
+        assert_eq!(pron("FASTER"), "F AE S T ER");
+        assert_eq!(pron("WASP"), "W AA S P");
     }
 
     #[test]

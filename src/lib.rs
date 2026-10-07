@@ -108,6 +108,12 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
     }
     text::end_utterance(&mut tokens);
     let (mut segs, seg_marks) = utterance::build_with_marks(&tokens);
+    if segs.iter().all(|s| s.ph.is_none()) {
+        return (
+            Vec::new(),
+            seg_marks.into_iter().map(|(id, _)| (id, 0)).collect(),
+        );
+    }
     prosody::assign_durations(&mut segs);
     let scale = DEFAULT_WPM / voice.wpm;
     for seg in &mut segs {
@@ -283,6 +289,7 @@ mod tests {
         let ids: Vec<u32> = marked.marks.iter().map(|m| m.0).collect();
         assert_eq!(ids, [1, 2, 3]);
         let at = |id: u32| marked.marks.iter().find(|m| m.0 == id).unwrap().1;
+        assert_eq!(at(1), 0);
         assert!(at(1) < at(2) && at(2) < at(3) && at(3) <= plain.len());
         let first = speak(
             &[Item::Text("Hello there.")],
@@ -292,6 +299,22 @@ mod tests {
         .samples
         .len();
         assert!((at(2) as f64 - first as f64).abs() < 0.2 * DEFAULT_SAMPLE_RATE as f64);
+    }
+
+    #[test]
+    fn marks_without_speech_produce_no_audio() {
+        let speech = speak(
+            &[Item::Mark(4), Item::Text(" , "), Item::Mark(5)],
+            DEFAULT_SAMPLE_RATE,
+            &Voice::default(),
+        );
+        assert_eq!(
+            speech,
+            Speech {
+                samples: Vec::new(),
+                marks: vec![(4, 0), (5, 0)]
+            }
+        );
     }
 
     #[test]

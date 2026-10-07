@@ -136,13 +136,17 @@ pub fn build(tokens: &[Token]) -> Vec<Seg> {
     build_with_marks(tokens).0
 }
 
-/// Also returns each mark with the index of the segment that follows it.
+/// Also returns each mark with the index of the segment that follows it; marks
+/// before any speech precede the leading pause.
 pub fn build_with_marks(tokens: &[Token]) -> (Vec<Seg>, Vec<(u32, usize)>) {
     let mut segs = vec![Seg::pause(None)];
     let mut marks = Vec::new();
     for token in tokens {
         match token {
-            Token::Mark(id) => marks.push((*id, segs.len())),
+            Token::Mark(id) => {
+                let speech_started = segs.iter().any(|s| s.ph.is_some());
+                marks.push((*id, if speech_started { segs.len() } else { 0 }));
+            }
             Token::Break(b) => {
                 if segs.last().is_some_and(|s| s.ph.is_some()) {
                     segs.push(Seg::pause(Some(*b)));

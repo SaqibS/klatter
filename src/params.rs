@@ -8,6 +8,14 @@ use crate::utterance::Seg;
 
 const ASPIRATION_DB: f64 = 55.0;
 const VOICE_BAR_DB: f64 = 47.0;
+/// Eloquence's /h/ is mostly voiced, with noise on top, rather than pure noise.
+const HH_AV_DB: f64 = 52.0;
+const HH_AH_DB: f64 = 55.0;
+/// Eloquence moves between sounds over about 25 ms; switching voicing or
+/// frication within one 5 ms frame sounds like clips spliced together.
+const CROSS_FADE_FRAMES: usize = 5;
+/// Fades run from this inaudible level so they span only the audible range.
+const FADE_FLOOR_DB: f64 = 30.0;
 const NASAL_ZERO_HZ: f64 = 450.0;
 
 /// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
@@ -362,7 +370,8 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
             }
             Class::Aspirate => {
                 for fr in &mut frames[range] {
-                    fr.ah = 60.0;
+                    fr.av = HH_AV_DB;
+                    fr.ah = HH_AH_DB;
                 }
             }
             Class::Stop | Class::Affricate => {
@@ -391,6 +400,8 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
         }
     }
 
+    cross_fade(segs, &starts, &lens, &mut frames);
+
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
     for i in 0..segs.len().saturating_sub(1) {
@@ -416,6 +427,56 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
     match timing {
         Timing::Original => frames,
         Timing::CompactHolds => compact_holds(segs, &starts, &lens, &formants, &frames),
+    }
+}
+
+/// Smooths voicing and fricative noise across segment boundaries. Stop and
+/// affricate bursts stay abrupt because their sharpness is the cue.
+fn cross_fade(segs: &[Seg], starts: &[usize], lens: &[usize], frames: &mut [Frame]) {
+    let mut fricative = vec![false; frames.len()];
+    for i in 0..segs.len() {
+        if segs[i].ph.is_some_and(|p| p.class() == Class::Fricative) {
+            fricative[starts[i]..starts[i] + lens[i]].fill(true);
+        }
+    }
+    let half = CROSS_FADE_FRAMES / 2;
+    let smooth = |track: Vec<f64>| -> Vec<f64> {
+        (0..track.len())
+            .map(|k| {
+                let window = &track[k.saturating_sub(half)..(k + half + 1).min(track.len())];
+                let mean =
+                    window.iter().map(|v| v.max(FADE_FLOOR_DB)).sum::<f64>() / window.len() as f64;
+                if mean > FADE_FLOOR_DB + 0.5 {
+                    mean
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
+    let av = smooth(frames.iter().map(|f| f.av).collect());
+    let noise = smooth(
+        frames
+            .iter()
+            .zip(&fricative)
+            .map(|(f, &m)| if m { f.af } else { 0.0 })
+            .collect(),
+    );
+    for k in 0..frames.len() {
+        frames[k].av = av[k];
+        if fricative[k] {
+            frames[k].af = noise[k];
+        } else if noise[k] > 0.0 && frames[k].af == 0.0 {
+            // The fading tail keeps the spectrum of the fricative it belongs to.
+            let source = (1..=half)
+                .flat_map(|d| [k.checked_sub(d), Some(k + d)])
+                .flatten()
+                .find(|&j| j < frames.len() && fricative[j])
+                .unwrap();
+            frames[k].af = noise[k];
+            frames[k].ab = frames[source].ab;
+            frames[k].a = frames[source].a;
+        }
     }
 }
 
@@ -569,6 +630,24 @@ mod tests {
         let (starts, lens) = frame_layout(&segs);
         let frames = build_frames(&segs);
         (segs, starts, lens, frames)
+    }
+
+    #[test]
+    fn voicing_fades_into_stop_closure_but_burst_stays_sharp() {
+        let (segs, starts, _, frames) = frames_for("at");
+        let t = segs.iter().position(|s| s.ph == Some(Ph::T)).unwrap();
+        let closure = starts[t];
+        for k in closure - 2..closure + 3 {
+            let step = frames[k - 1].av.max(FADE_FLOOR_DB) - frames[k].av.max(FADE_FLOOR_DB);
+            assert!(
+                step < 15.0,
+                "frame {k}: {} -> {}",
+                frames[k - 1].av,
+                frames[k].av
+            );
+        }
+        let burst = frames[closure..].iter().position(|f| f.af > 0.0).unwrap() + closure;
+        assert_eq!(frames[burst - 1].af, 0.0);
     }
 
     #[test]

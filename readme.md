@@ -12,7 +12,7 @@ It was then improved using Susan Hertz's papers, whose work also underlies the E
 - [A nucleus-based timing model applied to multi-dialect speech synthesis by rule (1992)](https://www.isca-archive.org/icslp_1992/hertz92_icslp.pdf): timing the vowel and its following liquids and glides as one nucleus, and shortening the voiced vowel after aspiration.
 - [Language-universal and language-specific components in the multi-language ETI-Eloquence text-to-speech system (1999)](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf): transition timings, the timing inside AY, AW and OY, and where the accent peak falls.
 
-In addition to the engine, there is a command-line tool which accepts input and output paths, with an optional vowel timing setting.
+In addition to the engine, there is a command-line tool which accepts input and output paths.
 
 ## Building and running
 
@@ -23,21 +23,9 @@ target\release\klatter in.txt out.wav
 
 The output is a 16 kHz, 16-bit mono WAV file. The library function `klatter::synthesize(text, sample_rate)` also accepts other sample rates. Repeated calls to `klatt::Synth::render` on the same synthesizer preserve both synthesis state and fractional-sample timing, so rendering frames in chunks produces the same samples as rendering them together. The project uses no third-party crates.
 
-### Compact vowel holds
-
-```
-target\release\klatter --timing compact-holds in.txt out.wav
-```
-
-`--timing original` is the default. Compact timing finds each vowel's longest steady formant interval after aspiration. It retains the first 20 ms of dwell plus 25% of any excess, subject to the existing stress-sensitive vowel minimum plus aspiration. Additional frames are retained where necessary to avoid creating F0 steps above 3 Hz per 5 ms (or increasing an already steeper contour). These shared coefficients are modeling choices, not published Eloquence rules. The timing policy does not depend on word names or change pronunciation.
-
-All moving formant transitions, consonants, pauses and aspiration frames are copied unchanged. Within a shortened hold, the existing frame parameters are linearly resampled, preserving both endpoints rather than splicing across a pitch or breathiness change. F0 is time-mapped, not regenerated or shifted; its time-weighted mean can nevertheless change. This does not shorten slow diphthong glides or fix incorrect phoneme choices, and it is not a uniform speaking-rate adjustment.
-
-Use `synthesize_frames_with_timing(text, params::Timing::CompactHolds)` for raw frames, or `synthesize_with_timing(text, sample_rate, params::Timing::CompactHolds)` for normalized PCM. `params::build_frames_with_timing` also accepts already-timed segments. Compaction occurs after the original frame layout is built; segment durations and `params::frame_layout` still describe the original timeline, not offsets into compacted frames.
-
 Relevant sources for further general rules:
 
-- [Hertz, Younes and Zinovieva (1999), section 3](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf): explicit phones and transitions, nucleus duration allocation, and context-dependent values at phone edges. Compact timing borrows the hold/transition distinction, not their complete acoustic model.
+- [Hertz, Younes and Zinovieva (1999), section 3](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf): explicit phones and transitions, nucleus duration allocation, and context-dependent values at phone edges.
 - [eSpeak NG phoneme tables](https://github.com/espeak-ng/espeak-ng/blob/master/docs/phontab.md): context-sensitive phoneme variants, consonant effects on vowel length, and separately specified vowel entry/exit transitions. Its [length calculation](https://github.com/espeak-ng/espeak-ng/blob/master/src/libespeak-ng/setlengths.c) also considers following consonants, stress and syllable position. No code or tables are imported.
 - [Festival duration module](https://github.com/festvox/festival/blob/master/lib/duration.scm): both hand-written Klatt rules and CART-based duration models, including phone-normalized log-duration predictions. Klatter does not use a learned duration model.
 - [CMUdict](https://github.com/cmusphinx/cmudict): a broad English pronunciation reference for evaluating phoneme sequences and stress. It is not a duration or acoustic-trajectory model, and its maintainers explicitly caution that entries can contain errors. It is not bundled here.

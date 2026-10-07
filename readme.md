@@ -12,14 +12,17 @@ It was then improved using Susan Hertz's papers, whose work also underlies the E
 - [A nucleus-based timing model applied to multi-dialect speech synthesis by rule (1992)](https://www.isca-archive.org/icslp_1992/hertz92_icslp.pdf): timing the vowel and its following liquids and glides as one nucleus, and shortening the voiced vowel after aspiration.
 - [Language-universal and language-specific components in the multi-language ETI-Eloquence text-to-speech system (1999)](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf): transition timings, the timing inside AY, AW and OY, and where the accent peak falls.
 
-In addition to the engine, there is a command-line tool which accepts input and output paths.
+In addition to the engine, there is a command-line tool which accepts input and output paths, and a speaking rate.
 
 ## Building and running
 
 ```
 cargo build --release
 target\release\klatter in.txt out.wav
+target\release\klatter -r 300 in.txt out.wav
 ```
+
+The rate is in words per minute, as with `say -r` (`--rate=300` also works); the default is Klatter's natural rate of 220. Every segment and pause scales by the same factor; `klatter::synthesize_at_rate(text, sample_rate, wpm)` does the same from the library.
 
 The output is a 16 kHz, 16-bit mono WAV file. The library function `klatter::synthesize(text, sample_rate)` also accepts other sample rates. Repeated calls to `klatt::Synth::render` on the same synthesizer preserve both synthesis state and fractional-sample timing, so rendering frames in chunks produces the same samples as rendering them together. The project uses no third-party crates.
 

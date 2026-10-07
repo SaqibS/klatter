@@ -24,15 +24,32 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 /// Peak level after normalization, leaving headroom below full scale.
 const PEAK: f64 = 0.89 * i16::MAX as f64;
 
+/// Klatter's natural speaking rate, averaged over two long readings including pauses.
+pub const DEFAULT_WPM: f64 = 220.0;
+
 pub fn synthesize_frames(input: &str) -> Vec<klatt::Frame> {
+    synthesize_frames_at_rate(input, DEFAULT_WPM)
+}
+
+/// `wpm` must be positive and finite.
+pub fn synthesize_frames_at_rate(input: &str, wpm: f64) -> Vec<klatt::Frame> {
     let tokens = text::normalize(input);
     let mut segs = utterance::build(&tokens);
     prosody::assign_durations(&mut segs);
+    let scale = DEFAULT_WPM / wpm;
+    for seg in &mut segs {
+        seg.dur_ms *= scale;
+    }
     params::build_frames(&segs)
 }
 
 pub fn synthesize(input: &str, sample_rate: u32) -> Vec<i16> {
-    let frames = synthesize_frames(input);
+    synthesize_at_rate(input, sample_rate, DEFAULT_WPM)
+}
+
+/// `wpm` must be positive and finite.
+pub fn synthesize_at_rate(input: &str, sample_rate: u32, wpm: f64) -> Vec<i16> {
+    let frames = synthesize_frames_at_rate(input, wpm);
     let raw = klatt::Synth::new(sample_rate).render(&frames);
     let peak = raw.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     let scale = if peak > 0.0 { PEAK / peak } else { 0.0 };
@@ -89,6 +106,19 @@ mod tests {
             for (q, s) in question.iter().zip(statement) {
                 assert_eq!(klatt::Frame { f0: s.f0, ..*q }, s);
             }
+        }
+    }
+
+    #[test]
+    fn rate_scales_duration() {
+        let text = "Alice was beginning to get very tired of sitting by her sister on the bank.";
+        let normal = synthesize_frames(text).len() as f64;
+        for factor in [0.5, 2.0, 3.0] {
+            let len = synthesize_frames_at_rate(text, DEFAULT_WPM * factor).len() as f64;
+            assert!(
+                (len * factor / normal - 1.0).abs() < 0.1,
+                "{factor}: {len} vs {normal}"
+            );
         }
     }
 

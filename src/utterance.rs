@@ -233,6 +233,23 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_stress_survives_inflection() {
+        use Ph::*;
+        assert_eq!(pronounce("ALICE"), vec![(AE, 1), (L, 0), (IH, 0), (S, 0)]);
+        let root = vec![(K, 0), (AX, 0), (N, 0), (S, 0), (IH, 1), (D, 0), (ER, 0)];
+        assert_eq!(pronounce("CONSIDER"), root);
+        for (word, suffix) in [
+            ("CONSIDERS", vec![(Z, 0)]),
+            ("CONSIDERED", vec![(D, 0)]),
+            ("CONSIDERING", vec![(IH, 0), (NG, 0)]),
+        ] {
+            let mut expected = root.clone();
+            expected.extend(suffix);
+            assert_eq!(pronounce(word), expected, "{word}");
+        }
+    }
+
+    #[test]
     fn down_and_inflections_keep_the_aw_vowel() {
         use Ph::*;
         let root = vec![(D, 0), (AW, 1), (N, 0)];

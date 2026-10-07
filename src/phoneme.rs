@@ -318,8 +318,9 @@ impl Ph {
             // makes open vowels several dB louder than close ones. F1
             // bandwidths are wider than Klatt's so the F1 peak does not
             // dominate; Eloquence's vowels have more energy around it.
-            // Formant targets are fitted so that vowel onsets and offsets
-            // match Eloquence's in running speech.
+            // Formant targets are fitted to Eloquence's in running speech:
+            // stressed vowels at their onsets and offsets, schwa across the
+            // whole vowel because it is short and rarely reaches a target.
             IY => sp([250.0, 2100.0, 2790.0], [80.0, 200.0, 400.0], 62.0),
             IH => sp([330.0, 1750.0, 2530.0], [90.0, 100.0, 140.0], 62.0),
             EY => dip(
@@ -346,7 +347,7 @@ impl Ph {
                 63.0,
             ),
             AH => sp([410.0, 1320.0, 2530.0], [140.0, 50.0, 140.0], 60.5),
-            AX => sp([450.0, 1300.0, 2510.0], [140.0, 90.0, 150.0], 61.0),
+            AX => sp([380.0, 1345.0, 2510.0], [140.0, 90.0, 150.0], 61.0),
             IX => sp([420.0, 1650.0, 2400.0], [105.0, 90.0, 150.0], 61.0),
             ER => sp([390.0, 1280.0, 2000.0], [175.0, 60.0, 110.0], 59.5),
             AY => dip(
@@ -372,8 +373,9 @@ impl Ph {
             Y => sp([270.0, 1980.0, 2880.0], [40.0, 250.0, 500.0], 57.0),
             R => sp([370.0, 1260.0, 1940.0], [70.0, 100.0, 120.0], 57.0),
             L => sp([300.0, 1030.0, 3000.0], [50.0, 100.0, 280.0], 57.0),
-            M => sp([480.0, 1130.0, 2270.0], [40.0, 200.0, 200.0], 57.0),
-            N => sp([480.0, 1470.0, 2590.0], [40.0, 300.0, 300.0], 57.0),
+            // Nasal F2 is fitted to Eloquence's nasal murmur.
+            M => sp([480.0, 1220.0, 2270.0], [40.0, 200.0, 200.0], 57.0),
+            N => sp([480.0, 1550.0, 2590.0], [40.0, 300.0, 300.0], 57.0),
             NG => sp([480.0, 1870.0, 2660.0], [160.0, 150.0, 400.0], 57.0),
 
             F => fr(

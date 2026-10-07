@@ -82,6 +82,14 @@ const CLOSURE_AFTER_OFFGLIDE_MS: f64 = 15.0;
 const DIPHTHONG_GLIDE_MS: f64 = 80.0;
 const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
 const MIN_ONSET_MS: f64 = 30.0;
+/// Eloquence reaches vowel targets in about half the time these rules give;
+/// with its short, evenly timed vowels, full-length transitions leave vowels
+/// drifting toward their neighbours instead of holding their quality.
+const TRANSITION_SCALE: f64 = 0.5;
+
+fn scale_transition(frames: usize) -> usize {
+    (frames as f64 * TRANSITION_SCALE).round() as usize
+}
 
 fn is_obstruent(p: Ph) -> bool {
     matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
@@ -123,6 +131,7 @@ fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
 fn transition_windows(segs: &[Seg], lens: &[usize]) -> Vec<(usize, usize)> {
     let mut windows: Vec<(usize, usize)> = (0..segs.len().saturating_sub(1))
         .map(|i| transition_window(segs, i).unwrap_or((0, 0)))
+        .map(|(before, after)| (scale_transition(before), scale_transition(after)))
         .collect();
     for i in 0..segs.len() {
         let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
@@ -837,7 +846,8 @@ mod tests {
             let new = build_frames_with_timing(&segs, Timing::CompactHolds);
             let removed = old.len() - new.len();
             assert!(removed >= ms(30.0));
-            let closure = starts[vowel] + lens[vowel] - ms(CLOSURE_AFTER_OFFGLIDE_MS);
+            let closure =
+                starts[vowel] + lens[vowel] - scale_transition(ms(CLOSURE_AFTER_OFFGLIDE_MS));
             let glide = closure - ms(DIPHTHONG_OFFGLIDE_MS + DIPHTHONG_GLIDE_MS);
             assert_eq!(
                 &old[glide..closure],
@@ -898,11 +908,11 @@ mod tests {
     fn release_transition_can_use_more_than_half_the_segment() {
         let (mut segs, _, _, _) = frames_for("tea");
         let vowel = segs.iter().position(|s| s.ph == Some(Ph::IY)).unwrap();
-        segs[vowel].dur_ms = 100.0;
+        segs[vowel].dur_ms = 50.0;
         let (starts, lens) = frame_layout(&segs);
         let frames = build_frames(&segs);
         let start = starts[vowel];
-        let release = ms(RELEASE_AFTER_ASPIRATION_MS);
+        let release = scale_transition(ms(RELEASE_AFTER_ASPIRATION_MS));
         assert!(release > lens[vowel] / 2);
         let target = Ph::IY.spec().f;
         assert_ne!(frames[start + release - 1].f, target);
@@ -964,7 +974,8 @@ mod tests {
         for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("voice", Ph::OY)] {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
-            let closure = starts[vowel] + lens[vowel] - ms(CLOSURE_AFTER_OFFGLIDE_MS);
+            let closure =
+                starts[vowel] + lens[vowel] - scale_transition(ms(CLOSURE_AFTER_OFFGLIDE_MS));
             let offglide = closure - ms(DIPHTHONG_OFFGLIDE_MS);
             let glide = offglide - ms(DIPHTHONG_GLIDE_MS);
             let spec = ph.spec();

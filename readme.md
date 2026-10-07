@@ -41,6 +41,17 @@ Relevant sources for further general rules:
 
 The `ffi` crate builds `klatter.dll` with the C functions declared in `ffi/klatter.h`. `klatter_speak` takes parallel arrays of UTF-8 strings and mark ids (a null string means "mark here") plus a `KlatterVoice`, and returns 16-bit samples and mark positions that the caller releases with `klatter_free`. It returns null for invalid input and never unwinds a panic into the caller.
 
+### NVDA add-on
+
+`nvda/addon` holds an NVDA synthesizer driver that loads `klatter.dll` with ctypes. It supports rate, pitch, inflection and volume, index marks and mid-utterance pitch changes; NVDA's 0-100 settings map onto `KlatterVoice`, with 50 giving Klatter's natural voice and each 50 steps doubling or halving the rate or pitch. NVDA is a 64-bit x86 program, so the add-on carries an x64 DLL, which runs under emulation on ARM64 Windows.
+
+```
+rustup target add x86_64-pc-windows-msvc
+python nvda\build.py
+```
+
+This writes `target\klatter-<version>.nvda-addon`; open it to install it in NVDA, then restart NVDA and choose Klatter in the Speech settings. `python nvda\test_driver.py target\release\klatter.dll` tests the driver against stand-ins for NVDA's modules; the DLL must match the Python interpreter's architecture.
+
 ## Pipeline
 
 1. `text.rs` normalizes the text. It expands numbers, years, ordinals, money, percentages and common abbreviations, spells out acronyms, and splits clauses at punctuation. Typographic apostrophes are normalized before word splitting. Negative numbers retain their sign, and numbers with thousands separators are read as quantities rather than years.

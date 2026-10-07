@@ -1,7 +1,7 @@
 //! C interface to the engine, declared in `klatter.h`, for hosts that are not
 //! written in Rust.
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use engine::{Item, Voice};
@@ -64,9 +64,23 @@ pub unsafe extern "C" fn klatter_speak(
     sample_rate: u32,
     voice: *const KlatterVoice,
 ) -> *mut KlatterSpeech {
-    let Some(v) = (unsafe { voice.as_ref() }).copied() else {
-        return std::ptr::null_mut();
-    };
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        with_input(texts, marks, count, sample_rate, voice, |items, voice| {
+            own_speech(engine::speak(items, sample_rate, voice))
+        })
+    }));
+    result.ok().flatten().unwrap_or(std::ptr::null_mut())
+}
+
+unsafe fn with_input<R>(
+    texts: *const *const c_char,
+    marks: *const u32,
+    count: usize,
+    sample_rate: u32,
+    voice: *const KlatterVoice,
+    speak: impl FnOnce(&[Item], &Voice) -> R,
+) -> Option<R> {
+    let v = unsafe { voice.as_ref() }?;
     let valid = v.wpm.is_finite()
         && v.wpm > 0.0
         && v.pitch_hz.is_finite()
@@ -78,20 +92,18 @@ pub unsafe extern "C" fn klatter_speak(
         && sample_rate > 0
         && (count == 0 || !texts.is_null());
     if !valid {
-        return std::ptr::null_mut();
+        return None;
     }
     let mut items = Vec::with_capacity(count);
     for i in 0..count {
         let text = unsafe { *texts.add(i) };
         if text.is_null() {
             if marks.is_null() {
-                return std::ptr::null_mut();
+                return None;
             }
             items.push(Item::Mark(unsafe { *marks.add(i) }));
         } else {
-            let Ok(text) = unsafe { CStr::from_ptr(text) }.to_str() else {
-                return std::ptr::null_mut();
-            };
+            let text = unsafe { CStr::from_ptr(text) }.to_str().ok()?;
             items.push(Item::Text(text));
         }
     }
@@ -101,12 +113,10 @@ pub unsafe extern "C" fn klatter_speak(
         inflection: v.inflection,
         volume: v.volume,
     };
-    // Unwinding across the C boundary is undefined behaviour.
-    let Ok(speech) = catch_unwind(AssertUnwindSafe(|| {
-        engine::speak(&items, sample_rate, &voice)
-    })) else {
-        return std::ptr::null_mut();
-    };
+    Some(speak(&items, &voice))
+}
+
+fn own_speech(speech: engine::Speech) -> *mut KlatterSpeech {
     let (mark_ids, mark_samples) = speech.marks.into_iter().unzip();
     let mut owned = Box::new(OwnedSpeech {
         header: KlatterSpeech {
@@ -128,6 +138,47 @@ pub unsafe extern "C" fn klatter_speak(
         mark_count: owned.mark_ids.len(),
     };
     Box::into_raw(owned).cast()
+}
+
+pub type SpeechCallback = unsafe extern "C" fn(*const KlatterSpeech, *mut c_void) -> c_int;
+
+/// Streams borrowed audio blocks; returns 1 on completion, 0 on cancellation,
+/// or -1 on invalid input or synthesis failure. The callback returns zero to cancel.
+///
+/// # Safety
+/// Inputs have the same requirements as [`klatter_speak`]. The callback must not
+/// unwind, free the block, or retain its pointers after returning. `context`
+/// must be valid for the callback. All calls are synchronous on the calling thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_speak_stream(
+    texts: *const *const c_char,
+    marks: *const u32,
+    count: usize,
+    sample_rate: u32,
+    voice: *const KlatterVoice,
+    callback: Option<SpeechCallback>,
+    context: *mut c_void,
+) -> c_int {
+    let Some(callback) = callback else { return -1 };
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        with_input(texts, marks, count, sample_rate, voice, |items, voice| {
+            engine::speak_stream(items, sample_rate, voice, |samples, marks| {
+                let (ids, offsets): (Vec<_>, Vec<_>) = marks.iter().copied().unzip();
+                let block = KlatterSpeech {
+                    samples: samples.as_ptr(),
+                    sample_count: samples.len(),
+                    mark_ids: ids.as_ptr(),
+                    mark_samples: offsets.as_ptr(),
+                    mark_count: ids.len(),
+                };
+                callback(&block, context) != 0
+            })
+        })
+    }));
+    match result {
+        Ok(Some(completed)) => c_int::from(completed),
+        _ => -1,
+    }
 }
 
 /// # Safety
@@ -253,5 +304,117 @@ mod tests {
         assert!(!speech.is_null());
         assert_eq!(unsafe { (*speech).mark_count }, 0);
         unsafe { klatter_free(speech) };
+    }
+
+    #[derive(Default)]
+    struct StreamState {
+        speech: engine::Speech,
+        cancel_on_audio: bool,
+        audio_blocks: usize,
+        valid_offsets: bool,
+    }
+
+    unsafe extern "C" fn collect(block: *const KlatterSpeech, context: *mut c_void) -> c_int {
+        let state = unsafe { &mut *context.cast::<StreamState>() };
+        let block = unsafe { &*block };
+        let samples = unsafe { std::slice::from_raw_parts(block.samples, block.sample_count) };
+        let ids = unsafe { std::slice::from_raw_parts(block.mark_ids, block.mark_count) };
+        let offsets = unsafe { std::slice::from_raw_parts(block.mark_samples, block.mark_count) };
+        let start = state.speech.samples.len();
+        state.valid_offsets &= offsets.iter().all(|&at| at <= block.sample_count);
+        state
+            .speech
+            .marks
+            .extend(ids.iter().zip(offsets).map(|(&id, &at)| (id, start + at)));
+        state.speech.samples.extend_from_slice(samples);
+        if !samples.is_empty() {
+            state.audio_blocks += 1;
+            if state.cancel_on_audio {
+                return 0;
+            }
+        }
+        1
+    }
+
+    #[test]
+    fn streaming_c_api_matches_owned_speech_and_cancels() {
+        let texts = [
+            std::ptr::null(),
+            c"Hello there.".as_ptr(),
+            std::ptr::null(),
+            c"How are you?".as_ptr(),
+            std::ptr::null(),
+        ];
+        let marks = [1, 0, 2, 0, 3];
+        let expected = engine::speak(
+            &[
+                Item::Mark(1),
+                Item::Text("Hello there."),
+                Item::Mark(2),
+                Item::Text("How are you?"),
+                Item::Mark(3),
+            ],
+            22050,
+            &Voice::default(),
+        );
+        for cancel in [false, true] {
+            let mut state = StreamState {
+                cancel_on_audio: cancel,
+                valid_offsets: true,
+                ..StreamState::default()
+            };
+            let status = unsafe {
+                klatter_speak_stream(
+                    texts.as_ptr(),
+                    marks.as_ptr(),
+                    texts.len(),
+                    22050,
+                    &default_voice(),
+                    Some(collect),
+                    (&mut state as *mut StreamState).cast(),
+                )
+            };
+            assert!(state.valid_offsets);
+            if cancel {
+                assert_eq!(status, 0);
+                assert_eq!(state.audio_blocks, 1);
+                assert_eq!(state.speech.samples, expected.samples[..2205]);
+            } else {
+                assert_eq!(status, 1);
+                assert_eq!(state.speech, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_rejects_invalid_input_without_calling_back() {
+        let mut state = StreamState::default();
+        let status = unsafe {
+            klatter_speak_stream(
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                16000,
+                &default_voice(),
+                Some(collect),
+                (&mut state as *mut StreamState).cast(),
+            )
+        };
+        assert_eq!(status, -1);
+        assert_eq!(state.audio_blocks, 0);
+        assert_eq!(
+            unsafe {
+                klatter_speak_stream(
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    16000,
+                    &default_voice(),
+                    None,
+                    std::ptr::null_mut(),
+                )
+            },
+            -1
+        );
     }
 }

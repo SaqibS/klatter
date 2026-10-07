@@ -34,6 +34,19 @@ void klatter_default_voice(KlatterVoice *out);
 KlatterSpeech *klatter_speak(const char *const *texts, const uint32_t *marks, size_t count,
                              uint32_t sample_rate, const KlatterVoice *voice);
 
+/* Called synchronously with borrowed blocks of at most 100 ms. Mark offsets
+   are relative to this block, and can equal sample_count. Empty blocks are
+   cancellation checkpoints before and after utterance planning.
+   Return 0 to cancel, nonzero to continue. Do not free a block or retain its
+   pointers after returning. No further callbacks occur after cancellation. */
+typedef int (*KlatterSpeechCallback)(const KlatterSpeech *block, void *context);
+
+/* Returns 1 on completion, 0 on cancellation, -1 on invalid input or failure.
+   Preserves utterance phrasing and synthesis state across audio blocks. */
+int klatter_speak_stream(const char *const *texts, const uint32_t *marks, size_t count,
+                        uint32_t sample_rate, const KlatterVoice *voice,
+                        KlatterSpeechCallback callback, void *context);
+
 void klatter_free(KlatterSpeech *speech);
 
 #ifdef __cplusplus

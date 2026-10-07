@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::BufWriter;
 use std::process::ExitCode;
 
-use klatter::{DEFAULT_SAMPLE_RATE, DEFAULT_WPM, synthesize_at_rate, wav};
+use klatter::{DEFAULT_SAMPLE_RATE, DEFAULT_WPM, Item, Voice, speak, wav};
 
 /// Accepts say(1)'s `-r rate` and `--rate=rate`, in words per minute.
 fn parse_args(args: &[String]) -> Option<(&str, &str, f64)> {
@@ -37,7 +37,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let samples = synthesize_at_rate(&text, DEFAULT_SAMPLE_RATE, wpm);
+    let samples = speak(
+        &[Item::Text(&text)],
+        DEFAULT_SAMPLE_RATE,
+        &Voice {
+            wpm,
+            ..Voice::default()
+        },
+    )
+    .samples;
     let result = File::create(output)
         .and_then(|f| wav::write_wav(BufWriter::new(f), &samples, DEFAULT_SAMPLE_RATE));
     if let Err(e) = result {

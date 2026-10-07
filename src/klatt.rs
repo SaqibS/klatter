@@ -519,6 +519,11 @@ impl Synth {
         (voice + voice_bar, noise, open)
     }
 
+    /// The index of the first sample `render` produces for `frame`.
+    pub fn frame_start(frame: usize, sample_rate: u32) -> usize {
+        (frame as u64 * sample_rate as u64 / FRAME_RATE as u64) as usize
+    }
+
     /// Renders frames to floating-point samples (unnormalized), preserving
     /// source, filter and fractional-sample timing state across calls.
     pub fn render(&mut self, frames: &[Frame]) -> Vec<f64> {

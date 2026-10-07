@@ -133,9 +133,16 @@ fn syllabify(phones: &[(Ph, u8)]) -> Vec<(usize, bool)> {
 }
 
 pub fn build(tokens: &[Token]) -> Vec<Seg> {
+    build_with_marks(tokens).0
+}
+
+/// Also returns each mark with the index of the segment that follows it.
+pub fn build_with_marks(tokens: &[Token]) -> (Vec<Seg>, Vec<(u32, usize)>) {
     let mut segs = vec![Seg::pause(None)];
+    let mut marks = Vec::new();
     for token in tokens {
         match token {
+            Token::Mark(id) => marks.push((*id, segs.len())),
             Token::Break(b) => {
                 if segs.last().is_some_and(|s| s.ph.is_some()) {
                     segs.push(Seg::pause(Some(*b)));
@@ -177,7 +184,7 @@ pub fn build(tokens: &[Token]) -> Vec<Seg> {
         segs.push(Seg::pause(Some(Break::Period)));
     }
     mark_phrase_final(&mut segs);
-    segs
+    (segs, marks)
 }
 
 fn mark_phrase_final(segs: &mut [Seg]) {

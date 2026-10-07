@@ -7,7 +7,8 @@
 //! as a first difference, as in the paper. A low-pass resonator adds the spectral
 //! tilt TL and aspiration noise AH is added. This excites the cascade vocal
 //! tract: nasal and tracheal pole-zero pairs, then F1 (which can change while
-//! the glottis is open, via DF1 and DB1) through F5. Frication excites the
+//! the glottis is open, via DF1 and DB1) through F3 and fixed poles above.
+//! Aspiration's own path swaps those fixed poles for F4/F5. Frication excites the
 //! parallel branch, whose resonators are normalized so that A2..A6 give the
 //! spectral peak level in dB relative to the flat bypass path AB. The 1980
 //! impulse-driven voice bar (AVS) is kept for stop closures.
@@ -19,9 +20,7 @@ pub const FRAME_MS: f64 = 1000.0 / FRAME_RATE as f64;
 
 /// Constants at their KLSYN88 defaults (Klatt & Klatt 1990, Table XII).
 const F4: f64 = 3250.0;
-const B4: f64 = 200.0;
 const F5: f64 = 3700.0;
-const B5: f64 = 200.0;
 const F6: f64 = 4990.0;
 const FNP: f64 = 280.0;
 const BNP: f64 = 90.0;
@@ -30,6 +29,20 @@ const FT: f64 = 2150.0;
 const BT: f64 = 180.0;
 /// Frication-excited parallel bandwidths B2F..B6F.
 const PARALLEL_BW: [f64; 5] = [250.0, 320.0, 350.0, 500.0, 1500.0];
+/// Cascade formants above F3 at natural male spacing, matched to Eloquence's
+/// vowel spectra. Poles up to and beyond the output band keep vowels' 3.5-5 kHz
+/// energy, which KLSYN88's 10 kHz-era F4/F5 alone lose at higher sample rates.
+const CASCADE_HIGH: [(f64, f64); 4] = [
+    (3400.0, 300.0),
+    (3900.0, 200.0),
+    (4700.0, 500.0),
+    (6000.0, 700.0),
+];
+/// Aspiration keeps KLSYN88's F4/F5 instead: through CASCADE_HIGH it hisses
+/// well above Eloquence's breath noise. Zeros cancel CASCADE_HIGH on the
+/// noise path because those poles must come last: ahead of the nasal and F1-F3
+/// filters, their boosted highs make the nasal zero click when it switches.
+const ASPIRATION_HIGH: [(f64, f64); 2] = [(F4, 200.0), (F5, 200.0)];
 
 /// Period lengths are quantized to a quarter sample to avoid audible
 /// "staircase" steps in slowly changing F0 (1990 paper, note 17).
@@ -177,6 +190,53 @@ impl AntiResonator {
         let y = self.a * x + self.b * self.x1 + self.c * self.x2;
         self.x2 = self.x1;
         self.x1 = x;
+        y
+    }
+}
+
+/// Eloquence renders at 11025 Hz, so the reference voice has almost no energy
+/// above its 5.5 kHz Nyquist; fricative energy up there reads as hiss.
+const OUTPUT_CUTOFF_HZ: f64 = 5400.0;
+/// Pole-pair Q values of an 8th-order Butterworth low-pass.
+const BUTTERWORTH_8_Q: [f64; 4] = [0.5098, 0.6013, 0.9000, 2.5629];
+
+#[derive(Clone, Copy, Default, Debug)]
+struct Biquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl Biquad {
+    fn lowpass(f: f64, q: f64, sr: f64) -> Self {
+        let w = 2.0 * PI * f / sr;
+        let alpha = w.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        let b1 = (1.0 - w.cos()) / a0;
+        Biquad {
+            b0: b1 / 2.0,
+            b1,
+            b2: b1 / 2.0,
+            a1: -2.0 * w.cos() / a0,
+            a2: (1.0 - alpha) / a0,
+            ..Default::default()
+        }
+    }
+
+    fn tick(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
         y
     }
 }
@@ -397,12 +457,15 @@ pub struct Synth {
     rtz: AntiResonator,
     f1_closed: Resonator,
     f1_open: Resonator,
-    cascade: [Resonator; 5],
+    cascade: [Resonator; 7],
+    aspiration_high: [Resonator; 2],
+    aspiration_cancel: [AntiResonator; 4],
     parallel: [Resonator; 5],
     parallel_norm: [f64; 5],
     voice_rad: Radiation,
     bar_rad: Radiation,
     noise_rad: Radiation,
+    output_lowpass: Vec<Biquad>,
 }
 
 impl Synth {
@@ -423,12 +486,22 @@ impl Synth {
             rtz: AntiResonator::default(),
             f1_closed: Resonator::default(),
             f1_open: Resonator::default(),
-            cascade: [Resonator::default(); 5],
+            cascade: [Resonator::default(); 7],
+            aspiration_high: [Resonator::default(); 2],
+            aspiration_cancel: [AntiResonator::default(); 4],
             parallel: [Resonator::default(); 5],
             parallel_norm: [0.0; 5],
             voice_rad: Radiation::default(),
             bar_rad: Radiation::default(),
             noise_rad: Radiation::default(),
+            output_lowpass: if OUTPUT_CUTOFF_HZ < 0.45 * sr {
+                BUTTERWORTH_8_Q
+                    .iter()
+                    .map(|&q| Biquad::lowpass(OUTPUT_CUTOFF_HZ, q, sr))
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
         s.tilt.bypass();
         s.rgp_bar.set(0.0, 100.0, sr);
@@ -444,10 +517,26 @@ impl Synth {
         self.rtz.set(fr.ftz, fr.btz, sr);
         self.f1_closed.set(fr.f[0], fr.b[0], sr);
         self.f1_open.set(fr.f[0] + fr.df1, fr.b[0] + fr.db1, sr);
-        let freqs = [fr.f[1], fr.f[2], F4, F5];
-        let bws = [fr.b[1], fr.b[2], B4, B5];
-        for i in 0..4 {
-            self.cascade[i + 1].set(freqs[i], bws[i], sr);
+        self.cascade[1].set(fr.f[1], fr.b[1], sr);
+        self.cascade[2].set(fr.f[2], fr.b[2], sr);
+        for (i, &(f, b)) in CASCADE_HIGH.iter().enumerate() {
+            if f < 0.45 * sr {
+                self.cascade[i + 3].set(f, b, sr);
+                self.aspiration_cancel[i].set(f, b, sr);
+            } else {
+                self.cascade[i + 3].bypass();
+                self.aspiration_cancel[i] = AntiResonator {
+                    a: 1.0,
+                    ..AntiResonator::default()
+                };
+            }
+        }
+        for (r, &(f, b)) in self.aspiration_high.iter_mut().zip(&ASPIRATION_HIGH) {
+            if f < 0.45 * sr {
+                r.set(f, b, sr);
+            } else {
+                r.bypass();
+            }
         }
         if fr.tl != self.tilt_tl {
             self.tilt_tl = fr.tl;
@@ -507,7 +596,14 @@ impl Synth {
             for _ in 0..n {
                 let (voice, noise, open) = self.excite(fr, av, avs, voiced);
 
-                let mut x = voice + noise * ah;
+                let mut breath = noise * ah;
+                for z in &mut self.aspiration_cancel {
+                    breath = z.tick(breath);
+                }
+                for r in &mut self.aspiration_high {
+                    breath = r.tick(breath);
+                }
+                let mut x = voice + breath;
                 x = self.rnp.tick(x);
                 x = self.rnz.tick(x);
                 x = self.rtp.tick(x);
@@ -518,7 +614,7 @@ impl Synth {
                     self.f1_closed
                 };
                 self.cascade[0].copy_coefficients(&f1);
-                for k in 0..5 {
+                for k in 0..self.cascade.len() {
                     x = self.cascade[k].tick(x);
                 }
                 let cascade = x * CASCADE_GAIN;
@@ -529,7 +625,11 @@ impl Synth {
                     let sign = if k % 2 == 0 { -1.0 } else { 1.0 };
                     parallel += sign * self.parallel[k].tick(fric * pa[k]);
                 }
-                out.push(cascade + parallel * PARALLEL_GAIN);
+                let mut y = cascade + parallel * PARALLEL_GAIN;
+                for stage in &mut self.output_lowpass {
+                    y = stage.tick(y);
+                }
+                out.push(y);
             }
         }
         out

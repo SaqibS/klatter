@@ -1,7 +1,7 @@
 """Per-vowel median F1-F3: Eloquence vs our rendering vs our table targets.
 
 Eloquence is measured over each vowel's aligned span (align.tsv); ours over the
-exact segment span (segs.tsv), so a gap between "ours measured" and "our target"
+exact segment span retained in align.tsv, so a gap between "ours measured" and "our target"
 shows what coarticulation and the synthesizer do to the table values, and the
 gap to Eloquence shows which targets to move. Only stressed content-word vowels
 plus the reduced AX/IX are used, since unstressed full vowels drift toward schwa.
@@ -9,7 +9,7 @@ plus the reduced AX/IX are used, since unstressed full vowels drift toward schwa
 Usage: python vowels.py WORKDIR [candidate.wav] [min_eloq_dur_s=0]
 """
 from common import (VOWELS, eloq_span, formants_at, is_stressed_content, load_align,
-                    load_reference, load_segs, our_span, parse_args, vm)
+                    load_reference, our_span, parse_args, vm)
 import numpy as np
 
 
@@ -19,7 +19,7 @@ def main():
     ref_x, ref_sr = load_reference(workdir)
     ours_x, ours_sr = vm.load(candidate)
     eloq, ours, target = {}, {}, {}
-    for row, seg in zip(load_align(workdir), load_segs(workdir)):
+    for row in load_align(workdir):
         vowel = row["ph"]
         if vowel not in VOWELS or not (is_stressed_content(row) or vowel in ("AX", "IX")):
             continue
@@ -27,7 +27,7 @@ def main():
         if e1 - e0 < min_dur:
             continue
         fe = formants_at(ref_x, ref_sr, e0, e1)
-        fo = formants_at(ours_x, ours_sr, *our_span(seg))
+        fo = formants_at(ours_x, ours_sr, *our_span(row))
         if fe is not None and fo is not None:
             eloq.setdefault(vowel, []).append(fe)
             ours.setdefault(vowel, []).append(fo)

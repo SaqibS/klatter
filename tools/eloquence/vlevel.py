@@ -14,7 +14,7 @@ import collections
 
 import numpy as np
 
-from common import VOWELS, eloq_span, load_align, load_reference, load_segs, our_span, parse_args, vm
+from common import VOWELS, eloq_span, load_align, load_reference, our_span, parse_args, vm
 
 
 def level_db(x, sr, t0, t1):
@@ -28,12 +28,12 @@ def main():
     ref_x, ref_sr = load_reference(workdir)
     ours_x, ours_sr = vm.load(candidate)
     eloq, ours = collections.defaultdict(list), collections.defaultdict(list)
-    for row, seg in zip(load_align(workdir), load_segs(workdir)):
+    for row in load_align(workdir):
         vowel = row["ph"]
-        if vowel not in VOWELS or float(seg["dur_ms"]) / 1000 < 0.06 or not row["eloq_start"]:
+        if vowel not in VOWELS or float(row["dur_ms"]) / 1000 < 0.06 or not row["eloq_start"]:
             continue
         e = level_db(ref_x, ref_sr, *eloq_span(row))
-        o = level_db(ours_x, ours_sr, *our_span(seg))
+        o = level_db(ours_x, ours_sr, *our_span(row))
         if e is not None and o is not None:
             eloq[vowel].append(e)
             ours[vowel].append(o)

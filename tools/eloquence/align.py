@@ -20,16 +20,13 @@ import os
 
 import numpy as np
 
-from common import load_reference, load_segs, parse_args, read_tsv, vm
-
-HOP = 0.005
-WIN = 0.025
+from common import load_reference, load_segs, our_span, parse_args, read_tsv, vm
 
 
-def frame_count(n_samples, sr):
-    """Number of WIN-long analysis frames at HOP spacing (the alignment grid)."""
-    win, hop = int(WIN * sr), int(HOP * sr)
-    return len(range(0, n_samples - win + 1, hop))
+def reference_spans(rows, anchors):
+    """Map exact segment boundaries through the monotonic word anchors."""
+    ours, reference = np.array(anchors).T
+    return np.interp(np.array([our_span(row) for row in rows]), ours, reference)
 
 
 def our_word_spans(rows):
@@ -77,27 +74,12 @@ def main():
     gaps = np.diff([a[1] for a in anchors])
     print(f"anchors {len(anchors)}, eloq gap median {np.median(gaps):.2f}s max {gaps.max():.1f}s")
 
-    n_ours = frame_count(len(ours_x), ours_sr)
-    # eloq_frame[j] = Eloquence frame (fractional) for our frame j.
-    eloq_frame = np.full(n_ours, np.nan)
-    for (o0, e0), (o1, e1) in zip(anchors, anchors[1:]):
-        ours_idx = np.arange(int(o0 / HOP), min(int(o1 / HOP), n_ours))
-        if len(ours_idx) == 0:
-            continue
-        eloq_frame[ours_idx] = np.interp(ours_idx, [ours_idx[0], ours_idx[-1]], [e0 / HOP, e1 / HOP])
-    known = ~np.isnan(eloq_frame)
-    frames = np.arange(n_ours)
-    eloq_frame = np.interp(frames, np.where(known)[0], eloq_frame[known])
-
     align_path = os.path.join(workdir, "align.tsv")
     with open(align_path, "w", newline="") as out:
         writer = csv.writer(out, delimiter="\t")
         writer.writerow(list(rows[0].keys()) + ["eloq_start", "eloq_end"])
-        for row in rows:
-            start = float(row["start_ms"]) / 1000 / HOP
-            end = start + float(row["dur_ms"]) / 1000 / HOP
-            writer.writerow(list(row.values()) + [f"{np.interp(start, frames, eloq_frame) * HOP:.3f}",
-                                                  f"{np.interp(end, frames, eloq_frame) * HOP:.3f}"])
+        for row, (start, end) in zip(rows, reference_spans(rows, anchors)):
+            writer.writerow(list(row.values()) + [f"{start:.3f}", f"{end:.3f}"])
 
     win = int(0.02 * ref_sr)
 

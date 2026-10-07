@@ -118,6 +118,7 @@ pub fn assign_durations(segs: &mut [Seg]) {
     // The vowel's (percent, minimum), kept so its nucleus can be timed as a whole.
     let mut vowel_scaling = vec![(1.0, 0.0); segs.len()];
     for i in 0..segs.len() {
+        segs[i].aspiration_ms = 0.0;
         let Some(ph) = segs[i].ph else {
             segs[i].dur_ms = pause_ms(segs[i].brk, i == 0 || i == last);
             continue;
@@ -232,7 +233,16 @@ pub fn assign_durations(segs: &mut [Seg]) {
             let floor = segs[i].ph.map_or(0.0, |p| p.durations().1 / 2.0);
             segs[i].dur_ms =
                 (segs[i].dur_ms - VOWEL_SHORTENING_AFTER_ASPIRATION_MS).max(floor) + asp;
+            segs[i].aspiration_ms = asp;
         }
+    }
+}
+
+/// Scales segment and onset budgets together, preserving the voiced portion.
+pub fn scale_durations(segs: &mut [Seg], scale: f64) {
+    for seg in segs {
+        seg.dur_ms *= scale;
+        seg.aspiration_ms *= scale;
     }
 }
 

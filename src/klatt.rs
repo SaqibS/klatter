@@ -17,6 +17,7 @@ use std::f64::consts::PI;
 
 const FRAME_RATE: u32 = 200;
 pub const FRAME_MS: f64 = 1000.0 / FRAME_RATE as f64;
+const REFERENCE_SAMPLE_RATE: f64 = 16_000.0;
 
 /// Constants at their KLSYN88 defaults (Klatt & Klatt 1990, Table XII).
 const F4: f64 = 3250.0;
@@ -353,13 +354,20 @@ impl GlottalSource {
 struct NoiseSource {
     rng: u32,
     lp: f64,
+    pole: f64,
+    gain: f64,
 }
 
 impl NoiseSource {
-    fn new() -> Self {
+    fn new(sr: f64) -> Self {
+        let pole = 0.75f64.powf(REFERENCE_SAMPLE_RATE / sr);
+        // Keep the noise's spectral density and low-pass corner in physical units.
+        let gain = (sr / REFERENCE_SAMPLE_RATE).sqrt() * (1.0 - pole) / 0.25;
         NoiseSource {
             rng: 0x2545_F491,
             lp: 0.0,
+            pole,
+            gain,
         }
     }
 
@@ -375,7 +383,7 @@ impl NoiseSource {
 
     fn tick(&mut self) -> f64 {
         let r = (0..16).map(|_| self.uniform()).sum::<f64>() * 0.5;
-        self.lp = r + 0.75 * self.lp;
+        self.lp = r * self.gain + self.pole * self.lp;
         self.lp
     }
 }
@@ -397,6 +405,7 @@ impl Radiation {
 
 pub struct Synth {
     sr: f64,
+    radiation_gain: f64,
     sample_remainder: u64,
     source: GlottalSource,
     noise: NoiseSource,
@@ -425,9 +434,10 @@ impl Synth {
         let sr = sample_rate as f64;
         let mut s = Synth {
             sr,
+            radiation_gain: sr / REFERENCE_SAMPLE_RATE,
             sample_remainder: 0,
             source: GlottalSource::new(),
-            noise: NoiseSource::new(),
+            noise: NoiseSource::new(sr),
             tilt: Resonator::default(),
             tilt_tl: 0.0,
             rgp_bar: Resonator::default(),
@@ -516,7 +526,12 @@ impl Synth {
         if voiced && !open {
             noise *= 0.5;
         }
-        (voice + voice_bar, noise, open)
+        // A first difference measures change per sample; radiation is per unit time.
+        (
+            (voice + voice_bar) * self.radiation_gain,
+            noise * self.radiation_gain,
+            open,
+        )
     }
 
     /// The index of the first sample `render` produces for `frame`.
@@ -759,6 +774,53 @@ mod tests {
                     chunked == whole,
                     "{sr} Hz, {chunk_size} frames: waveform mismatch"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn source_levels_are_consistent_across_sample_rates() {
+        let sources = [
+            (
+                "voicing",
+                Frame {
+                    av: 60.0,
+                    ..Frame::default()
+                },
+            ),
+            (
+                "voice bar",
+                Frame {
+                    avs: 47.0,
+                    ..Frame::default()
+                },
+            ),
+            (
+                "aspiration",
+                Frame {
+                    ah: 55.0,
+                    ..Frame::default()
+                },
+            ),
+            (
+                "frication",
+                Frame {
+                    af: 60.0,
+                    a: [0.0, 55.0, 50.0, 45.0, 40.0],
+                    ..Frame::default()
+                },
+            ),
+        ];
+        let rms = |frame: Frame, sr| {
+            let audio = Synth::new(sr).render(&vec![frame; 400]);
+            let tail = &audio[audio.len() / 2..];
+            (tail.iter().map(|x| x * x).sum::<f64>() / tail.len() as f64).sqrt()
+        };
+        for (name, frame) in sources {
+            let reference = rms(frame, 16000);
+            for sr in [22050, 44100, 48000] {
+                let db = 20.0 * (rms(frame, sr) / reference).log10();
+                assert!(db.abs() < 1.5, "{name} at {sr} Hz: {db:.2} dB");
             }
         }
     }

@@ -157,7 +157,8 @@ pub fn split(word: &str) -> Option<(String, Suffix)> {
         let es_root = &word[..word.len() - 2];
         // Function words are not evidence for a lexical root, as in USES versus US.
         let known_root = |root: &str| {
-            lexicon::lookup(root).is_some_and(|entry| entry.iter().any(|(_, stress)| *stress > 0))
+            lexicon::lookup_phones(root)
+                .is_some_and(|entry| entry.iter().any(|(_, stress)| *stress > 0))
         };
         let root = match (known_root(s_root), known_root(es_root)) {
             // Root-level LTS keeps the suffix from changing lexical stress.

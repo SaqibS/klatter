@@ -54,7 +54,8 @@ def pause_stats(speech):
     # Gaps under 100 ms are stop closures, not prosodic breaks.
     edges = np.diff(np.concatenate([[1], speech.astype(int), [1]]))
     starts, ends = np.where(edges == -1)[0], np.where(edges == 1)[0]
-    lengths = (ends - starts)[1:-1] if len(starts) > 2 else np.array([])
+    internal = (starts > 0) & (ends < len(speech))
+    lengths = (ends - starts)[internal]
     lengths = lengths[lengths * HOP_S >= 0.1]
     speech_min = speech.sum() * HOP_S / 60
     return {

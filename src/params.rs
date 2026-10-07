@@ -97,9 +97,7 @@ fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
         // Formants move during aspiration, so the release transition spans it.
         let release = match lp.class() {
             Class::Fricative => Some(RELEASE_AFTER_FRICATIVE_MS),
-            Class::Stop if prosody::aspiration_ms(segs, i) > 0.0 => {
-                Some(RELEASE_AFTER_ASPIRATION_MS)
-            }
+            Class::Stop if segs[i + 1].aspiration_ms > 0.0 => Some(RELEASE_AFTER_ASPIRATION_MS),
             _ => None,
         };
         match release {
@@ -134,7 +132,7 @@ fn transition_windows(segs: &[Seg], lens: &[usize]) -> Vec<(usize, usize)> {
         if incoming + outgoing > available {
             // Share only contested time, keeping one target frame between transitions.
             let aspiration = if i > 0 {
-                aspiration_frames(segs, i - 1, available)
+                aspiration_frames(segs, i - 1, lens[i])
             } else {
                 0
             };
@@ -269,7 +267,7 @@ fn release_frames(ph: Ph) -> usize {
 }
 
 fn aspiration_frames(segs: &[Seg], i: usize, next_len: usize) -> usize {
-    ms(prosody::aspiration_ms(segs, i)).min(next_len)
+    ms(segs[i + 1].aspiration_ms).min(next_len.saturating_sub(1))
 }
 
 fn is_voiceless(p: Option<Ph>) -> bool {
@@ -332,8 +330,15 @@ fn apply_voice_quality(fr: &mut Frame, b: f64, offset: f64) {
 
 pub fn build_frames(segs: &[Seg]) -> Vec<Frame> {
     let (starts, lens) = frame_layout(segs);
-    let formants = formant_tracks(segs, &starts, &lens);
-    let f0 = prosody::f0_contour(segs, &starts, &lens, FRAME_MS);
+    build_frames_with_layout(segs, &starts, &lens)
+}
+
+/// Builds frames using the layout returned by [`frame_layout`] for these segments.
+pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Frame> {
+    assert_eq!(segs.len(), starts.len());
+    assert_eq!(segs.len(), lens.len());
+    let formants = formant_tracks(segs, starts, lens);
+    let f0 = prosody::f0_contour(segs, starts, lens, FRAME_MS);
     let mut frames: Vec<Frame> = (0..formants.len())
         .map(|k| Frame {
             f0: f0[k],
@@ -397,7 +402,7 @@ pub fn build_frames(segs: &[Seg]) -> Vec<Frame> {
         }
     }
 
-    cross_fade(segs, &starts, &lens, &mut frames);
+    cross_fade(segs, starts, lens, &mut frames);
 
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
@@ -540,6 +545,37 @@ mod tests {
                     .count();
                 let expected = ms(prosody::aspiration_ms(&segs, i));
                 assert_eq!(actual, expected, "{text}: {:?}", segs[i].ph);
+            }
+        }
+    }
+
+    #[test]
+    fn rate_scales_aspiration_and_preserves_voicing() {
+        for text in ["try", "quick", "cat cat", "tea", "to be", "stay"] {
+            for scale in [2.0, 1.0, 0.5, 1.0 / 3.0] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                let budgets: Vec<f64> = segs.iter().map(|s| s.aspiration_ms).collect();
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_layout(&segs, &starts, &lens);
+                for i in 1..segs.len() {
+                    assert_eq!(segs[i].aspiration_ms, budgets[i] * scale);
+                    if budgets[i] == 0.0 {
+                        continue;
+                    }
+                    let part = &frames[starts[i]..starts[i] + lens[i]];
+                    let expected = ms(budgets[i] * scale).min(lens[i] - 1);
+                    let actual = part
+                        .iter()
+                        .take_while(|f| f.av == 0.0 && f.ah > 0.0)
+                        .count();
+                    assert_eq!(actual, expected, "{text}, scale {scale}, segment {i}");
+                    assert!(
+                        part[expected..].iter().any(|f| f.av > 0.0),
+                        "{text}, scale {scale}, segment {i} lost voicing"
+                    );
+                }
             }
         }
     }

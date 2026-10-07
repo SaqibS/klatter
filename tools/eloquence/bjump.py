@@ -13,7 +13,7 @@ import collections
 
 import numpy as np
 
-from common import load_align, load_reference, load_segs, parse_args, vm
+from common import load_align, load_reference, parse_args, vm
 
 HOP = 0.005
 BAND_EDGES = [100, 300, 600, 1000, 1500, 2200, 3000, 4000, 5400]
@@ -58,17 +58,17 @@ def main():
     ours_x, ours_sr = vm.load(candidate)
     eloq_low, eloq_high = band_flux(ref_x, ref_sr)
     ours_low, ours_high = band_flux(ours_x, ours_sr)
-    aligned, segs = load_align(workdir), load_segs(workdir)
+    aligned = load_align(workdir)
     # Per transition: [eloq low, ours low, eloq high, ours high] peak flux values.
     by_transition = collections.defaultdict(lambda: [[], [], [], []])
-    for i in range(1, min(len(aligned), len(segs))):
+    for i in range(1, len(aligned)):
         if not aligned[i]["eloq_start"]:
             continue
         transition = phone_class(aligned[i - 1]["ph"]) + ">" + phone_class(aligned[i]["ph"])
         if "pause" in transition:
             continue
         t_eloq = float(aligned[i]["eloq_start"])
-        t_ours = float(segs[i]["start_ms"]) / 1000
+        t_ours = float(aligned[i]["start_ms"]) / 1000
         e0, e1 = int((t_eloq - 0.03) / HOP), int((t_eloq + 0.03) / HOP)
         o0, o1 = int((t_ours - 0.015) / HOP), int((t_ours + 0.015) / HOP)
         if e1 >= len(eloq_low) or o1 >= len(ours_low):

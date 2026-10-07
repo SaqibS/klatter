@@ -80,7 +80,9 @@ const RELEASE_AFTER_FRICATIVE_MS: f64 = 30.0;
 const RELEASE_AFTER_ASPIRATION_MS: f64 = 70.0;
 const CLOSURE_AFTER_OFFGLIDE_MS: f64 = 15.0;
 const DIPHTHONG_GLIDE_MS: f64 = 80.0;
-const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
+/// Eloquence finishes the AY and AW glide about 70% of the way through the
+/// vowel and holds the end quality, rather than gliding until the last moment.
+const DIPHTHONG_OFFGLIDE_MS: f64 = 50.0;
 const MIN_ONSET_MS: f64 = 30.0;
 /// Eloquence reaches vowel targets in about half the time these rules give;
 /// with its short, evenly timed vowels, full-length transitions leave vowels
@@ -174,7 +176,7 @@ fn targets(ph: Ph, len: usize) -> Vec<Formants> {
     let spec = ph.spec();
     let frames = |ms: f64| ms / FRAME_MS;
     // Hertz, Younes & Zinovieva (1999): AY, AW and OY are vowel plus glide, with
-    // a fixed glide transition and a brief offglide; the onset vowel takes the
+    // a fixed glide transition and an offglide hold; the onset vowel takes the
     // rest. Short ones and the one-phone diphthongs scale proportionally.
     let fixed = matches!(ph, Ph::AY | Ph::AW | Ph::OY)
         && len as f64 >= frames(DIPHTHONG_GLIDE_MS + DIPHTHONG_OFFGLIDE_MS + MIN_ONSET_MS);

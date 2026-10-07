@@ -30,6 +30,9 @@ class KlatterSpeech(ctypes.Structure):
                 ("mark_samples", ctypes.POINTER(ctypes.c_size_t)), ("mark_count", ctypes.c_size_t)]
 
 
+SpeechCallback = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(KlatterSpeech), ctypes.c_void_p)
+
+
 def load_engine(path):
     dll = ctypes.CDLL(path)
     dll.klatter_default_voice.argtypes = [ctypes.POINTER(KlatterVoice)]
@@ -37,27 +40,60 @@ def load_engine(path):
     dll.klatter_speak.argtypes = [ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(ctypes.c_uint32),
                                   ctypes.c_size_t, ctypes.c_uint32, ctypes.POINTER(KlatterVoice)]
     dll.klatter_speak.restype = ctypes.POINTER(KlatterSpeech)
+    dll.klatter_speak_stream.argtypes = dll.klatter_speak.argtypes + [SpeechCallback, ctypes.c_void_p]
+    dll.klatter_speak_stream.restype = ctypes.c_int
     dll.klatter_free.argtypes = [ctypes.POINTER(KlatterSpeech)]
     dll.klatter_free.restype = None
     return dll
 
 
-def speak_items(dll, items, voice):
-    """Speaks strings and integer marks as one utterance; returns PCM bytes and
-    (mark, byte offset) pairs."""
+def encode_items(items):
     count = len(items)
     texts = (ctypes.c_char_p * count)(*(None if isinstance(i, int) else i.encode("utf-8") for i in items))
     marks = (ctypes.c_uint32 * count)(*(i if isinstance(i, int) else 0 for i in items))
-    result = dll.klatter_speak(texts, marks, count, SAMPLE_RATE, ctypes.byref(voice))
+    return texts, marks
+
+
+def speech_data(s):
+    audio = ctypes.string_at(s.samples, s.sample_count * BYTES_PER_SAMPLE) if s.sample_count else b""
+    offsets = [(s.mark_ids[k], s.mark_samples[k] * BYTES_PER_SAMPLE) for k in range(s.mark_count)]
+    return audio, offsets
+
+
+def speak_items(dll, items, voice):
+    """Speaks strings and integer marks as one utterance; returns PCM bytes and
+    (mark, byte offset) pairs."""
+    texts, marks = encode_items(items)
+    result = dll.klatter_speak(texts, marks, len(items), SAMPLE_RATE, ctypes.byref(voice))
     if not result:
         raise ValueError("Klatter rejected the input")
     try:
-        s = result.contents
-        audio = ctypes.string_at(s.samples, s.sample_count * BYTES_PER_SAMPLE) if s.sample_count else b""
-        offsets = [(s.mark_ids[k], s.mark_samples[k] * BYTES_PER_SAMPLE) for k in range(s.mark_count)]
+        return speech_data(result.contents)
     finally:
         dll.klatter_free(result)
-    return audio, offsets
+
+
+def stream_items(dll, items, voice, on_chunk):
+    """Calls on_chunk with bounded PCM blocks; False cancels native synthesis."""
+    texts, marks = encode_items(items)
+    errors = []
+
+    @SpeechCallback
+    def callback(block, context):
+        try:
+            return int(on_chunk(*speech_data(block.contents)))
+        except Exception as error:
+            # Python exceptions cannot propagate through a native callback.
+            errors.append(error)
+            return 0
+
+    status = dll.klatter_speak_stream(texts, marks, len(items), SAMPLE_RATE,
+                                    ctypes.byref(voice), callback, None)
+    if errors:
+        raise errors[0]
+    if status < 0:
+        raise ValueError("Klatter rejected the input or could not synthesize it")
+    return status == 1
 
 
 def make_voice(default, rate, pitch, inflection, volume):
@@ -194,7 +230,12 @@ class SynthDriver(BaseSynthDriver):
 
     def _play(self, generation, voice, items):
         """Returns False once this generation is cancelled."""
-        audio, marks = speak_items(self._dll, items, voice)
+        return stream_items(self._dll, items, voice,
+                            lambda audio, marks: self._feed(generation, audio, marks))
+
+    def _feed(self, generation, audio, marks):
+        if generation != self._generation:
+            return False
         start = 0
         for mark, end in marks + [(None, len(audio))]:
             onDone = None
@@ -203,11 +244,11 @@ class SynthDriver(BaseSynthDriver):
                     if generation == self._generation:
                         synthIndexReached.notify(synth=self, index=mark)
             # Empty pieces still carry their mark, as NVDA's eSpeak driver does.
-            pieces = [audio[k:min(k + FEED_BYTES, end)] for k in range(start, end, FEED_BYTES)] or [b""]
-            for k, piece in enumerate(pieces):
+            for k in range(start, max(start + 1, end), FEED_BYTES):
                 if generation != self._generation:
                     return False
-                last = k == len(pieces) - 1
+                piece = audio[k:min(k + FEED_BYTES, end)]
+                last = k + FEED_BYTES >= end
                 if piece or (last and onDone):
                     self._player.feed(piece, onDone=onDone if last else None)
                 if generation != self._generation:

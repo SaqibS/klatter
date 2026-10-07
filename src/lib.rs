@@ -78,24 +78,62 @@ pub fn synthesize(input: &str, sample_rate: u32) -> Vec<i16> {
 /// Speaks all items as one utterance, so text on either side of a mark keeps
 /// its phrasing.
 pub fn speak(items: &[Item], sample_rate: u32, voice: &Voice) -> Speech {
+    let mut speech = Speech::default();
+    speak_stream(items, sample_rate, voice, |samples, marks| {
+        let start = speech.samples.len();
+        speech
+            .marks
+            .extend(marks.iter().map(|&(id, offset)| (id, start + offset)));
+        speech.samples.extend_from_slice(samples);
+        true
+    });
+    speech
+}
+
+/// Speaks one utterance in blocks of at most 100 ms without resetting synthesis
+/// state. Mark offsets are relative to the current block, including its end.
+///
+/// Return false from `output` to cancel; this function returns false on cancellation.
+/// The callback also receives empty blocks as cancellation checkpoints before
+/// and after utterance planning. No callback is made after cancellation.
+/// All callbacks run synchronously; slices are valid only for the callback.
+pub fn speak_stream(
+    items: &[Item],
+    sample_rate: u32,
+    voice: &Voice,
+    mut output: impl FnMut(&[i16], &[(u32, usize)]) -> bool,
+) -> bool {
+    if !output(&[], &[]) {
+        return false;
+    }
     let (frames, frame_marks) = frames_with_marks(items, voice);
-    let raw = klatt::Synth::new(sample_rate).render(&frames);
+    if !output(&[], &[]) {
+        return false;
+    }
+    let mut synth = klatt::Synth::new(sample_rate);
+    let mut marks = frame_marks.into_iter().peekable();
+    let mut sample_start = 0;
     let gain = GAIN * voice.volume;
-    Speech {
-        samples: raw
+    for (block, chunk) in frames.chunks(20).enumerate() {
+        let raw = synth.render(chunk);
+        let pcm: Vec<i16> = raw
             .iter()
             .map(|x| (x * gain).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
-            .collect(),
-        marks: frame_marks
-            .into_iter()
-            .map(|(id, frame)| {
-                (
-                    id,
-                    klatt::Synth::frame_start(frame, sample_rate).min(raw.len()),
-                )
-            })
-            .collect(),
+            .collect();
+        let frame_end = block * 20 + chunk.len();
+        let mut block_marks = Vec::new();
+        while marks.peek().is_some_and(|m| m.1 <= frame_end) {
+            let (id, frame) = marks.next().unwrap();
+            let offset = klatt::Synth::frame_start(frame, sample_rate) - sample_start;
+            block_marks.push((id, offset));
+        }
+        if !output(&pcm, &block_marks) {
+            return false;
+        }
+        sample_start += pcm.len();
     }
+    let remaining: Vec<_> = marks.map(|(id, _)| (id, 0)).collect();
+    remaining.is_empty() || output(&[], &remaining)
 }
 
 fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(u32, usize)>) {
@@ -331,5 +369,112 @@ mod tests {
     #[test]
     fn empty_input_is_silent() {
         assert!(synthesize("", DEFAULT_SAMPLE_RATE).iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn streaming_matches_monolithic_audio_and_absolute_marks() {
+        let items = [
+            Item::Mark(1),
+            Item::Text("Hello"),
+            Item::Mark(2),
+            Item::Text(", world."),
+            Item::Mark(3),
+            Item::Mark(4),
+            Item::Text("How are you?"),
+            Item::Mark(5),
+        ];
+        for sample_rate in [8000, 16000, 16001, 22050, 44100, 48000] {
+            let voice = Voice {
+                wpm: 330.0,
+                pitch_hz: 110.0,
+                volume: 0.5,
+                ..Voice::default()
+            };
+            let (frames, marks) = frames_with_marks(&items, &voice);
+            let raw = klatt::Synth::new(sample_rate).render(&frames);
+            let expected: Vec<i16> = raw
+                .iter()
+                .map(|x| {
+                    (x * (GAIN * voice.volume))
+                        .round()
+                        .clamp(i16::MIN as f64, i16::MAX as f64) as i16
+                })
+                .collect();
+            let expected_marks: Vec<_> = marks
+                .iter()
+                .map(|&(id, f)| (id, klatt::Synth::frame_start(f, sample_rate)))
+                .collect();
+            let mut actual = Speech::default();
+            let mut checkpoints = 0;
+            assert!(speak_stream(&items, sample_rate, &voice, |audio, marks| {
+                if audio.is_empty() && marks.is_empty() {
+                    assert!(actual.samples.is_empty());
+                    checkpoints += 1;
+                }
+                assert!(audio.len() <= (sample_rate as usize).div_ceil(10));
+                assert!(marks.iter().all(|m| m.1 <= audio.len()));
+                actual.marks.extend(
+                    marks
+                        .iter()
+                        .map(|&(id, at)| (id, actual.samples.len() + at)),
+                );
+                actual.samples.extend_from_slice(audio);
+                true
+            }));
+            assert_eq!(checkpoints, 2);
+            assert_eq!(actual.samples, expected, "{sample_rate} Hz");
+            assert_eq!(actual.marks, expected_marks, "{sample_rate} Hz");
+        }
+    }
+
+    #[test]
+    fn streaming_can_cancel_before_or_after_planning_or_after_one_audio_block() {
+        let text = SENTENCE.repeat(100);
+        for cancel_on in [1, 2] {
+            let mut calls = 0;
+            assert!(!speak_stream(
+                &[Item::Text(&text)],
+                DEFAULT_SAMPLE_RATE,
+                &Voice::default(),
+                |audio, marks| {
+                    assert!(audio.is_empty() && marks.is_empty());
+                    calls += 1;
+                    calls != cancel_on
+                }
+            ));
+            assert_eq!(calls, cancel_on);
+        }
+        let mut audio_blocks = 0;
+        assert!(!speak_stream(
+            &[Item::Text(&text)],
+            DEFAULT_SAMPLE_RATE,
+            &Voice::default(),
+            |audio, _| {
+                assert_eq!(audio_blocks, 0, "callback after cancellation");
+                if audio.is_empty() {
+                    return true;
+                }
+                audio_blocks += 1;
+                assert_eq!(audio.len(), 1600);
+                false
+            }
+        ));
+        assert_eq!(audio_blocks, 1);
+    }
+
+    #[test]
+    fn streaming_preserves_empty_speech_marks() {
+        let mut marks = Vec::new();
+        assert!(speak_stream(
+            &[Item::Mark(1), Item::Text(" , "), Item::Mark(2)],
+            16000,
+            &Voice::default(),
+            |audio, block_marks| {
+                assert!(audio.is_empty());
+                marks.extend_from_slice(block_marks);
+                true
+            },
+        ));
+        assert_eq!(marks, [(1, 0), (2, 0)]);
     }
 }

@@ -12,6 +12,8 @@ pub enum Break {
 pub enum Token {
     Word(String),
     Break(Break),
+    /// A caller's position marker; it passes through to the audio untouched.
+    Mark(u32),
 }
 
 const ONES: [&str; 20] = [
@@ -316,6 +318,14 @@ fn is_thousands_separator(chars: &[char], i: usize) -> bool {
 }
 
 pub fn normalize(text: &str) -> Vec<Token> {
+    let mut out = normalize_fragment(text);
+    end_utterance(&mut out);
+    out
+}
+
+/// Normalizes text that may continue in a later fragment, so it gets no
+/// utterance-final break.
+pub fn normalize_fragment(text: &str) -> Vec<Token> {
     let mut out = Vec::new();
     let chars: Vec<char> = text
         .chars()
@@ -458,15 +468,19 @@ pub fn normalize(text: &str) -> Vec<Token> {
         }
         i += 1;
     }
-    match out.last() {
-        Some(Token::Word(_)) => out.push(Token::Break(Break::Period)),
-        Some(Token::Break(Break::Comma)) => {
-            out.pop();
-            out.push(Token::Break(Break::Period));
-        }
+    out
+}
+
+/// Ends the last clause as a statement, ahead of any trailing marks.
+pub fn end_utterance(tokens: &mut Vec<Token>) {
+    let Some(last) = tokens.iter().rposition(|t| !matches!(t, Token::Mark(_))) else {
+        return;
+    };
+    match tokens[last] {
+        Token::Word(_) => tokens.insert(last + 1, Token::Break(Break::Period)),
+        Token::Break(Break::Comma) => tokens[last] = Token::Break(Break::Period),
         _ => {}
     }
-    out
 }
 
 #[cfg(test)]
@@ -474,7 +488,11 @@ mod tests {
     use super::*;
 
     fn words(text: &str) -> String {
-        normalize(text)
+        show(normalize(text))
+    }
+
+    fn show(tokens: Vec<Token>) -> String {
+        tokens
             .into_iter()
             .map(|t| match t {
                 Token::Word(w) => w.to_lowercase(),
@@ -482,9 +500,31 @@ mod tests {
                 Token::Break(Break::Period) => ".".into(),
                 Token::Break(Break::Question) => "?".into(),
                 Token::Break(Break::Exclamation) => "!".into(),
+                Token::Mark(id) => format!("<{id}>"),
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn utterance_ends_before_trailing_marks() {
+        for (fragments, expected) in [
+            (vec!["one two"], "one two ."),
+            (vec!["one,"], "one ."),
+            (vec!["one", "<1>", "two", "<2>"], "one <1> two . <2>"),
+            (vec!["one,", "<1>"], "one . <1>"),
+            (vec!["<1>"], "<1>"),
+        ] {
+            let mut tokens = Vec::new();
+            for f in fragments {
+                match f.strip_prefix('<').and_then(|f| f.strip_suffix('>')) {
+                    Some(id) => tokens.push(Token::Mark(id.parse().unwrap())),
+                    None => tokens.extend(normalize_fragment(f)),
+                }
+            }
+            end_utterance(&mut tokens);
+            assert_eq!(show(tokens), expected);
+        }
     }
 
     #[test]

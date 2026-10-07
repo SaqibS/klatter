@@ -237,7 +237,7 @@ pub fn assign_durations(segs: &mut [Seg]) {
 }
 
 const TOP_F0: f64 = 120.0;
-const BASE_F0: f64 = 93.0;
+pub const BASE_F0: f64 = 93.0;
 const FLOOR_F0: f64 = 78.0;
 const HAT_RISE: f64 = 12.0;
 const ACCENT: f64 = 10.0;

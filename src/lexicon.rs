@@ -2,6 +2,11 @@
 //! Vowels carry stress digits: 1 primary, 2 secondary, 0 unstressed.
 //! Words whose vowels are all unstressed are treated as function words.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use crate::phoneme::Ph;
+
 const ENTRIES: &str = "
 A AX0
 AN AX0 N
@@ -104,6 +109,8 @@ UNDER AH1 N D ER0
 AFTER AE1 F T ER0
 AGAIN AX0 G EH1 N
 AGAINST AX0 G EH1 N S T
+ALICE AE1 L IH0 S
+CONSIDER K AX0 N S IH1 D ER0
 ONE W AH1 N
 ONCE W AH1 N S
 TWO T UW1
@@ -264,20 +271,42 @@ WE'RE W IH0 R
 ";
 
 pub fn lookup(word: &str) -> Option<Vec<(String, u8)>> {
-    ENTRIES.lines().find_map(|line| {
-        let mut parts = line.split_whitespace();
-        if parts.next()? != word {
-            return None;
-        }
-        Some(
-            parts
-                .map(|p| match p.strip_suffix(|c: char| c.is_ascii_digit()) {
-                    Some(stem) => (stem.to_string(), p.as_bytes()[p.len() - 1] - b'0'),
-                    None => (p.to_string(), 0),
-                })
-                .collect(),
-        )
+    lookup_phones(word).map(|phones| {
+        phones
+            .iter()
+            .map(|&(ph, stress)| (ph.name().to_string(), stress))
+            .collect()
     })
+}
+
+pub(crate) fn lookup_phones(word: &str) -> Option<&'static [(Ph, u8)]> {
+    static DICTIONARY: OnceLock<HashMap<&'static str, Vec<(Ph, u8)>>> = OnceLock::new();
+    DICTIONARY
+        .get_or_init(|| {
+            let mut entries = HashMap::new();
+            for line in ENTRIES.lines() {
+                let mut parts = line.split_whitespace();
+                let Some(word) = parts.next() else { continue };
+                let phones = parts
+                    .map(|p| {
+                        let (name, stress) = match p.strip_suffix(|c: char| c.is_ascii_digit()) {
+                            Some(stem) => (stem, p.as_bytes()[p.len() - 1] - b'0'),
+                            None => (p, 0),
+                        };
+                        let ph = Ph::parse(name)
+                            .unwrap_or_else(|| panic!("bad phoneme {name} in {word}"));
+                        (ph, stress)
+                    })
+                    .collect();
+                assert!(
+                    entries.insert(word, phones).is_none(),
+                    "duplicate dictionary entry: {word}"
+                );
+            }
+            entries
+        })
+        .get(word)
+        .map(Vec::as_slice)
 }
 
 #[cfg(test)]

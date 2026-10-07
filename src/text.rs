@@ -183,7 +183,7 @@ fn push_words(out: &mut Vec<Token>, words: impl IntoIterator<Item = String>) {
 }
 
 fn push_break(out: &mut Vec<Token>, b: Break) {
-    match out.last_mut() {
+    match out.iter_mut().rev().find(|t| !matches!(t, Token::Mark(_))) {
         None => {}
         Some(Token::Break(prev)) => {
             // A stronger break absorbs a weaker one (e.g. "word," then ".").
@@ -327,6 +327,12 @@ pub fn normalize(text: &str) -> Vec<Token> {
 /// utterance-final break.
 pub fn normalize_fragment(text: &str) -> Vec<Token> {
     let mut out = Vec::new();
+    append_normalized(text, &mut out);
+    out
+}
+
+/// Appends a word-boundary fragment using the preceding text's punctuation context.
+pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
     let chars: Vec<char> = text
         .chars()
         .map(|c| match c {
@@ -337,12 +343,20 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        let negative = (c == '\u{2212}'
-            || (c == '-' && (i == 0 || (!is_word_char(chars[i - 1]) && chars[i - 1] != '-'))))
-            && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit());
+        let sign = c == '\u{2212}'
+            || (c == '-' && (i == 0 || (!is_word_char(chars[i - 1]) && chars[i - 1] != '-')));
+        if sign
+            && chars.get(i + 1) == Some(&'$')
+            && chars.get(i + 2).is_some_and(|c| c.is_ascii_digit())
+        {
+            push_words(out, ["minus".to_string()]);
+            i += 1;
+            continue;
+        }
+        let negative = sign && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit());
         if c.is_ascii_digit() || negative {
             if negative {
-                push_words(&mut out, ["minus".to_string()]);
+                push_words(out, ["minus".to_string()]);
                 i += 1;
             }
             // Gather numbers with thousands separators and decimals.
@@ -370,13 +384,13 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
                 );
                 words.push("point".into());
                 words.extend(digit_words(&frac));
-                push_words(&mut out, words);
+                push_words(out, words);
                 i = k;
                 continue;
             }
             if j < chars.len() && chars[j] == '%' {
-                expand_number(&int_part, "", false, &mut out);
-                push_words(&mut out, ["percent".to_string()]);
+                expand_number(&int_part, "", false, out);
+                push_words(out, ["percent".to_string()]);
                 i = j + 1;
                 continue;
             }
@@ -385,16 +399,19 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
                 k += 1;
             }
             let suffix: String = chars[j..k].iter().collect();
-            expand_number(&int_part, &suffix, allow_year, &mut out);
+            expand_number(&int_part, &suffix, allow_year, out);
             i = k;
             continue;
         }
         if c == '$' {
-            let mut j = i + 1;
+            let negative = matches!(chars.get(i + 1), Some('-' | '\u{2212}'))
+                && chars.get(i + 2).is_some_and(|c| c.is_ascii_digit());
+            let start = i + 1 + usize::from(negative);
+            let mut j = start;
             while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == ',') {
                 j += 1;
             }
-            let amount: String = chars[i + 1..j].iter().filter(|c| **c != ',').collect();
+            let amount: String = chars[start..j].iter().filter(|c| **c != ',').collect();
             if let Ok(n) = amount.parse::<u64>() {
                 let mut cents = None;
                 let frac_len = chars[j..]
@@ -409,6 +426,9 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
                     j += 1 + frac_len;
                 }
                 let mut words = Vec::new();
+                if negative {
+                    words.push("minus".into());
+                }
                 if n > 0 || cents.is_none_or(|c| c == 0) {
                     words.extend(number_words(n));
                     words.push(if n == 1 { "dollar" } else { "dollars" }.to_string());
@@ -420,10 +440,10 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
                     words.extend(number_words(c));
                     words.push(if c == 1 { "cent" } else { "cents" }.to_string());
                 }
-                push_words(&mut out, words);
+                push_words(out, words);
                 i = j;
             } else {
-                push_words(&mut out, ["dollars".to_string()]);
+                push_words(out, ["dollars".to_string()]);
                 i += 1;
             }
             continue;
@@ -439,7 +459,7 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
             if is_abbrev && i < chars.len() && chars[i] == '.' {
                 i += 1;
             }
-            expand_word(&word, &mut out);
+            expand_word(&word, out);
             continue;
         }
         match c {
@@ -448,27 +468,24 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
                 while i + 1 < chars.len() && chars[i + 1] == '.' {
                     i += 1;
                 }
-                push_break(&mut out, Break::Period);
+                push_break(out, Break::Period);
             }
-            '!' => push_break(&mut out, Break::Exclamation),
-            '?' => push_break(&mut out, Break::Question),
-            ',' | ';' | ':' | '(' | ')' | '\u{2014}' | '\u{2013}' => {
-                push_break(&mut out, Break::Comma)
-            }
+            '!' => push_break(out, Break::Exclamation),
+            '?' => push_break(out, Break::Question),
+            ',' | ';' | ':' | '(' | ')' | '\u{2014}' | '\u{2013}' => push_break(out, Break::Comma),
             '-' if i + 1 < chars.len() && chars[i + 1] == '-' => {
-                push_break(&mut out, Break::Comma);
+                push_break(out, Break::Comma);
                 i += 1;
             }
-            '&' => push_words(&mut out, ["and".to_string()]),
-            '%' => push_words(&mut out, ["percent".to_string()]),
-            '+' => push_words(&mut out, ["plus".to_string()]),
-            '=' => push_words(&mut out, ["equals".to_string()]),
-            '@' => push_words(&mut out, ["at".to_string()]),
+            '&' => push_words(out, ["and".to_string()]),
+            '%' => push_words(out, ["percent".to_string()]),
+            '+' => push_words(out, ["plus".to_string()]),
+            '=' => push_words(out, ["equals".to_string()]),
+            '@' => push_words(out, ["at".to_string()]),
             _ => {}
         }
         i += 1;
     }
-    out
 }
 
 /// Ends the last clause as a statement, ahead of any trailing marks.
@@ -622,5 +639,23 @@ mod tests {
             "nineteen eighty four nineteen eighty five ."
         );
         assert_eq!(words("wait--5"), "wait , five .");
+    }
+
+    #[test]
+    fn negative_currency_keeps_the_sign_and_units() {
+        for input in ["-$5.25", "$-5.25", "\u{2212}$5.25", "$\u{2212}5.25"] {
+            assert_eq!(
+                words(input),
+                "minus five dollars and twenty five cents .",
+                "{input}"
+            );
+        }
+        assert_eq!(words("-$0.01"), "minus one cent .");
+        assert_eq!(words("$-1"), "minus one dollar .");
+        assert_eq!(
+            words("balance: -$1,234.50"),
+            "balance , minus one thousand two hundred thirty four dollars and fifty cents ."
+        );
+        assert_eq!(words("$5.25"), "five dollars and twenty five cents .");
     }
 }

@@ -53,7 +53,8 @@ impl Default for Voice {
     }
 }
 
-/// Input to [`speak`]: text, with marks the caller wants located in the audio.
+/// Input to [`speak`]: text fragments separated at word boundaries, with marks
+/// the caller wants located in the audio. Punctuation may occupy its own fragment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item<'a> {
     Text(&'a str),
@@ -140,7 +141,7 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
     let mut tokens = Vec::new();
     for item in items {
         match *item {
-            Item::Text(t) => tokens.extend(text::normalize_fragment(t)),
+            Item::Text(t) => text::append_normalized(t, &mut tokens),
             Item::Mark(id) => tokens.push(text::Token::Mark(id)),
         }
     }
@@ -154,11 +155,9 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
     }
     prosody::assign_durations(&mut segs);
     let scale = DEFAULT_WPM / voice.wpm;
-    for seg in &mut segs {
-        seg.dur_ms *= scale;
-    }
-    let (starts, _) = params::frame_layout(&segs);
-    let mut frames = params::build_frames(&segs);
+    prosody::scale_durations(&mut segs, scale);
+    let (starts, lens) = params::frame_layout(&segs);
+    let mut frames = params::build_frames_with_layout(&segs, &starts, &lens);
     let pitch_scale = voice.pitch_hz / prosody::BASE_F0;
     for f in &mut frames {
         // Written so the natural settings leave F0 bit-for-bit unchanged.
@@ -310,6 +309,23 @@ mod tests {
     }
 
     #[test]
+    fn speech_level_is_consistent_across_sample_rates() {
+        let rms = |sr| {
+            let audio = synthesize(SENTENCE, sr);
+            assert!(
+                audio.iter().all(|&s| s != i16::MIN && s != i16::MAX),
+                "{sr} Hz clips"
+            );
+            (audio.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / audio.len() as f64).sqrt()
+        };
+        let reference = rms(16000);
+        for sr in [8000, 22050, 44100, 48000] {
+            let db = 20.0 * (rms(sr) / reference).log10();
+            assert!(db.abs() < 1.0, "{sr} Hz: {db:.2} dB");
+        }
+    }
+
+    #[test]
     fn marks_do_not_change_the_audio_and_land_on_word_boundaries() {
         let plain = synthesize("Hello there. How are you?", DEFAULT_SAMPLE_RATE);
         let marked = speak(
@@ -364,6 +380,39 @@ mod tests {
         );
         assert_eq!(split, whole);
         assert_eq!(marks.len(), 1);
+    }
+
+    #[test]
+    fn punctuation_fragments_preserve_audio_and_mark_order() {
+        for (left, right) in [
+            ("hello", "?"),
+            ("hello", ", world"),
+            ("hello", ". world"),
+            ("hello,", ". world"),
+            ("hello.", ", world"),
+            ("", "? hello"),
+        ] {
+            let whole = synthesize(&format!("{left}{right}"), DEFAULT_SAMPLE_RATE);
+            let speech = speak(
+                &[
+                    Item::Mark(1),
+                    Item::Text(left),
+                    Item::Mark(2),
+                    Item::Mark(3),
+                    Item::Text(right),
+                    Item::Mark(4),
+                ],
+                DEFAULT_SAMPLE_RATE,
+                &Voice::default(),
+            );
+            assert_eq!(speech.samples, whole, "{left:?} + {right:?}");
+            assert_eq!(
+                speech.marks.iter().map(|m| m.0).collect::<Vec<_>>(),
+                [1, 2, 3, 4]
+            );
+            assert!(speech.marks.windows(2).all(|m| m[0].1 <= m[1].1));
+            assert!(speech.marks.iter().all(|m| m.1 <= speech.samples.len()));
+        }
     }
 
     #[test]

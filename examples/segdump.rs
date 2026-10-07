@@ -11,15 +11,30 @@
 //! With SCALE, every duration is multiplied by it and the result is also
 //! rendered to out.wav (16 kHz), e.g. to match a reference speaking rate.
 use klatter::*;
+use std::io::{self, BufWriter, Write};
+use std::process::ExitCode;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let text = std::fs::read_to_string(&args[1]).unwrap();
+fn parse_args(args: &[String]) -> Option<(&str, Option<(f64, &str)>)> {
+    match args {
+        [input] => Some((input, None)),
+        [input, scale, output] => {
+            let scale = scale
+                .parse::<f64>()
+                .ok()
+                .filter(|s| s.is_finite() && *s > 0.0)?;
+            Some((input, Some((scale, output))))
+        }
+        _ => None,
+    }
+}
+
+fn run(input: &str, render: Option<(f64, &str)>) -> io::Result<()> {
+    let text = std::fs::read_to_string(input)?;
     let tokens = text::normalize(&text);
-    let words: Vec<String> = tokens
+    let words: Vec<&str> = tokens
         .iter()
         .filter_map(|t| match t {
-            text::Token::Word(w) => Some(w.clone()),
+            text::Token::Word(w) => Some(w.as_str()),
             _ => None,
         })
         .collect();
@@ -27,30 +42,36 @@ fn main() {
     let mut segs = utterance::build(&tokens);
     prosody::assign_durations(&mut segs);
 
-    if let Some(scale) = args.get(2).map(|s| s.parse::<f64>().unwrap()) {
-        for seg in &mut segs {
-            seg.dur_ms *= scale;
-        }
-        let frames = params::build_frames(&segs);
+    if let Some((scale, _)) = render {
+        prosody::scale_durations(&mut segs, scale);
+    }
+    let (starts, lens) = params::frame_layout(&segs);
+    if let Some((_, output)) = render {
+        let frames = params::build_frames_with_layout(&segs, &starts, &lens);
         let raw = klatt::Synth::new(16000).render(&frames);
         let peak = raw.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        let pcm: Vec<i16> = raw.iter().map(|x| (x / peak * 29000.0) as i16).collect();
-        wav::write_wav(std::fs::File::create(&args[3]).unwrap(), &pcm, 16000).unwrap();
+        let gain = if peak > 0.0 { 29000.0 / peak } else { 0.0 };
+        let pcm: Vec<i16> = raw.iter().map(|x| (x * gain) as i16).collect();
+        wav::write_wav(BufWriter::new(std::fs::File::create(output)?), &pcm, 16000)?;
     }
 
-    let (starts, lens) = params::frame_layout(&segs);
-    println!("ph\tstress\tfn\tfinal\tstart_ms\tdur_ms\tf1\tf2\tf3\twi\tword");
+    let mut out = BufWriter::new(io::stdout().lock());
+    writeln!(
+        out,
+        "ph\tstress\tfn\tfinal\tstart_ms\tdur_ms\tf1\tf2\tf3\twi\tword"
+    )?;
     for (i, seg) in segs.iter().enumerate() {
         let (name, f) = match seg.ph {
             Some(p) => (p.name(), p.spec().f),
             None => ("_", [0.0; 3]),
         };
         let word = if seg.word_initial && seg.ph.is_some() {
-            word_iter.next().map_or("?", |w| w.as_str())
+            word_iter.next().copied().unwrap_or("?")
         } else {
             ""
         };
-        println!(
+        writeln!(
+            out,
             "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{word}",
             seg.stress,
             seg.function_word as u8,
@@ -61,6 +82,49 @@ fn main() {
             f[1],
             f[2],
             seg.word_initial as u8,
+        )?;
+    }
+    out.flush()
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some((input, render)) = parse_args(&args) else {
+        eprintln!("usage: segdump <text.txt> [SCALE <out.wav>]");
+        return ExitCode::from(2);
+    };
+    match run(input, render) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("segdump: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_complete_arguments_and_positive_finite_scales() {
+        for args in [
+            vec![],
+            vec!["text.txt", "2"],
+            vec!["text.txt", "0", "out.wav"],
+            vec!["text.txt", "-1", "out.wav"],
+            vec!["text.txt", "nan", "out.wav"],
+            vec!["text.txt", "inf", "out.wav"],
+            vec!["text.txt", "fast", "out.wav"],
+            vec!["text.txt", "2", "out.wav", "extra"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert!(parse_args(&args).is_none(), "{args:?}");
+        }
+        assert_eq!(parse_args(&["text.txt".into()]), Some(("text.txt", None)));
+        assert_eq!(
+            parse_args(&["text.txt".into(), "0.5".into(), "out.wav".into()]),
+            Some(("text.txt", Some((0.5, "out.wav"))))
         );
     }
 }

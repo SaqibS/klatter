@@ -25,6 +25,8 @@ pub struct Seg {
     /// Syllable is the last one before a pause.
     pub phrase_final: bool,
     pub dur_ms: f64,
+    /// Unvoiced onset budget within this segment, scaled with its duration.
+    pub aspiration_ms: f64,
 }
 
 impl Seg {
@@ -41,6 +43,7 @@ impl Seg {
             coda: false,
             phrase_final: false,
             dur_ms: 0.0,
+            aspiration_ms: 0.0,
         }
     }
 
@@ -50,11 +53,8 @@ impl Seg {
 }
 
 pub fn pronounce(word: &str) -> Vec<(Ph, u8)> {
-    if let Some(entry) = lexicon::lookup(word) {
-        return entry
-            .into_iter()
-            .filter_map(|(p, s)| Ph::parse(&p).map(|ph| (ph, s)))
-            .collect();
+    if let Some(entry) = lexicon::lookup_phones(word) {
+        return entry.to_vec();
     }
     let split = match word.strip_suffix("'S").filter(|b| !b.is_empty()) {
         Some(base) => Some((base.to_string(), Suffix::S)),
@@ -179,6 +179,7 @@ pub fn build_with_marks(tokens: &[Token]) -> (Vec<Seg>, Vec<(u32, usize)>) {
                         coda: syl[i].1,
                         phrase_final: false,
                         dur_ms: 0.0,
+                        aspiration_ms: 0.0,
                     });
                 }
             }
@@ -229,6 +230,23 @@ mod tests {
         assert_eq!(names("KLATT'S"), vec![Ph::K, Ph::L, Ph::AE, Ph::T, Ph::S]);
         assert_eq!(*names("DOG'S").last().unwrap(), Ph::Z);
         assert_eq!(names("JUDGE'S")[3..], [Ph::IH, Ph::Z]);
+    }
+
+    #[test]
+    fn dictionary_stress_survives_inflection() {
+        use Ph::*;
+        assert_eq!(pronounce("ALICE"), vec![(AE, 1), (L, 0), (IH, 0), (S, 0)]);
+        let root = vec![(K, 0), (AX, 0), (N, 0), (S, 0), (IH, 1), (D, 0), (ER, 0)];
+        assert_eq!(pronounce("CONSIDER"), root);
+        for (word, suffix) in [
+            ("CONSIDERS", vec![(Z, 0)]),
+            ("CONSIDERED", vec![(D, 0)]),
+            ("CONSIDERING", vec![(IH, 0), (NG, 0)]),
+        ] {
+            let mut expected = root.clone();
+            expected.extend(suffix);
+            assert_eq!(pronounce(word), expected, "{word}");
+        }
     }
 
     #[test]

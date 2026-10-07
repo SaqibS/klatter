@@ -10,8 +10,8 @@ pub fn pause_ms(brk: Option<Break>, utterance_edge: bool) -> f64 {
         _ if utterance_edge => 150.0,
         // Pauses are kept short; boundaries are carried
         // mainly by pitch and final lengthening.
-        Some(Break::Comma) => 100.0,
-        Some(_) => 200.0,
+        Some(Break::Comma) => 60.0,
+        Some(_) => 130.0,
         None => 150.0,
     }
 }
@@ -102,11 +102,11 @@ const VOWEL_SHORTENING_AFTER_ASPIRATION_MS: f64 = 20.0;
 /// Klatt's rules give, which avoids a drawl on content words, while unstressed
 /// syllables of content words stay audible instead of being swallowed.
 const STRESSED_VOWEL_FACTOR: f64 = 0.65;
-const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.4;
+const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.8;
 
-/// Stop closures and fricatives are about 20% shorter than
-/// Klatt's, which keeps consonants crisp and the rhythm vowel-led.
-const OBSTRUENT_FACTOR: f64 = 0.8;
+/// Closures stay short, while fricatives need time to carry their noise cue.
+const STOP_FACTOR: f64 = 0.8;
+const FRICATIVE_FACTOR: f64 = 0.95;
 
 /// Klatt's value is 1.4, but final vowels already escape non-final shortening
 /// and get the full postvocalic effect, so 1.4 drawls them; boundaries
@@ -118,6 +118,7 @@ pub fn assign_durations(segs: &mut [Seg]) {
     // The vowel's (percent, minimum), kept so its nucleus can be timed as a whole.
     let mut vowel_scaling = vec![(1.0, 0.0); segs.len()];
     for i in 0..segs.len() {
+        segs[i].aspiration_ms = 0.0;
         let Some(ph) = segs[i].ph else {
             segs[i].dur_ms = pause_ms(segs[i].brk, i == 0 || i == last);
             continue;
@@ -195,11 +196,10 @@ pub fn assign_durations(segs: &mut [Seg]) {
 
         vowel_scaling[i] = (prcnt, min);
         segs[i].dur_ms = (inh - min) * prcnt + min;
-        if matches!(
-            ph.class(),
-            Class::Stop | Class::Fricative | Class::Affricate
-        ) {
-            segs[i].dur_ms *= OBSTRUENT_FACTOR;
+        if ph.class() == Class::Fricative {
+            segs[i].dur_ms *= FRICATIVE_FACTOR;
+        } else if matches!(ph.class(), Class::Stop | Class::Affricate) {
+            segs[i].dur_ms *= STOP_FACTOR;
         }
     }
 
@@ -232,7 +232,16 @@ pub fn assign_durations(segs: &mut [Seg]) {
             let floor = segs[i].ph.map_or(0.0, |p| p.durations().1 / 2.0);
             segs[i].dur_ms =
                 (segs[i].dur_ms - VOWEL_SHORTENING_AFTER_ASPIRATION_MS).max(floor) + asp;
+            segs[i].aspiration_ms = asp;
         }
+    }
+}
+
+/// Scales segment and onset budgets together, preserving the voiced portion.
+pub fn scale_durations(segs: &mut [Seg], scale: f64) {
+    for seg in segs {
+        seg.dur_ms *= scale;
+        seg.aspiration_ms *= scale;
     }
 }
 
@@ -278,8 +287,11 @@ pub fn f0_contour(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f64)
             frame_ms,
             &mut f0,
         );
+        // Silent-frame pitch must not flatten the clause's boundary tone.
+        let begin = starts[clause_begin];
+        let end = starts[i - 1] + lens[i - 1];
+        smooth(&mut f0[begin..end], 9);
     }
-    smooth(&mut f0, 9);
     add_flutter(&mut f0, frame_ms);
     f0
 }
@@ -460,7 +472,7 @@ mod tests {
         let d = durations("extra cat");
         let s = d.iter().find(|(p, _)| *p == Ph::S).unwrap().1;
         let (inh, min) = Ph::S.durations();
-        let expected = ((inh - min) * 0.85 * 0.5 + min) * OBSTRUENT_FACTOR;
+        let expected = ((inh - min) * 0.85 * 0.5 + min) * FRICATIVE_FACTOR;
         assert!((s - expected).abs() < 1e-9, "{s} vs {expected}");
     }
 
@@ -475,7 +487,7 @@ mod tests {
                 .1
         };
         let (inh, min) = Ph::T.durations();
-        let final_t = ((inh - min) * PHRASE_FINAL_LENGTHENING * 0.85 + min) * OBSTRUENT_FACTOR;
+        let final_t = ((inh - min) * PHRASE_FINAL_LENGTHENING * 0.85 + min) * STOP_FACTOR;
         assert!((last_t("act") - final_t).abs() < 1e-9);
         assert!((last_t("act. cat") - final_t).abs() < 1e-9);
         let first_t = |text: &str| {
@@ -487,6 +499,16 @@ mod tests {
         };
         assert_eq!(first_t("tea"), first_t("bus. tea"));
         assert!(first_t("bus tea") < first_t("bus. tea"));
+    }
+
+    #[test]
+    fn phrase_breaks_are_shorter_than_utterance_padding() {
+        let comma = pause_ms(Some(Break::Comma), false);
+        let padding = pause_ms(None, true);
+        for ending in [Break::Period, Break::Question, Break::Exclamation] {
+            let sentence = pause_ms(Some(ending), false);
+            assert!(0.0 < comma && comma < sentence && sentence < padding);
+        }
     }
 
     #[test]

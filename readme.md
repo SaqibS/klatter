@@ -37,6 +37,10 @@ Relevant sources for further general rules:
 - [Festival duration module](https://github.com/festvox/festival/blob/master/lib/duration.scm): both hand-written Klatt rules and CART-based duration models, including phone-normalized log-duration predictions. Klatter does not use a learned duration model.
 - [CMUdict](https://github.com/cmusphinx/cmudict): a broad English pronunciation reference for evaluating phoneme sequences and stress. It is not a duration or acoustic-trajectory model, and its maintainers explicitly caution that entries can contain errors. It is not bundled here.
 
+### C interface
+
+The `ffi` crate builds `klatter.dll` with the C functions declared in `ffi/klatter.h`. `klatter_speak` takes parallel arrays of UTF-8 strings and mark ids (a null string means "mark here") plus a `KlatterVoice`, and returns 16-bit samples and mark positions that the caller releases with `klatter_free`. It returns null for invalid input and never unwinds a panic into the caller.
+
 ## Pipeline
 
 1. `text.rs` normalizes the text. It expands numbers, years, ordinals, money, percentages and common abbreviations, spells out acronyms, and splits clauses at punctuation. Typographic apostrophes are normalized before word splitting. Negative numbers retain their sign, and numbers with thousands separators are read as quantities rather than years.

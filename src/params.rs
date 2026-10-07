@@ -374,7 +374,9 @@ pub fn build_frames_with_timing(segs: &[Seg], timing: Timing) -> Vec<Frame> {
                 let closure = len - release;
                 for (k, fr) in frames[range].iter_mut().enumerate() {
                     if k < closure {
-                        fr.avs = if ph.is_voiced() { VOICE_BAR_DB } else { 0.0 };
+                        // Even voiceless closures carry a low murmur so
+                        // phrases flow without dead gaps, matching Eloquence.
+                        fr.avs = VOICE_BAR_DB;
                     } else {
                         fr.av = spec.av;
                         fr.af = spec.af;

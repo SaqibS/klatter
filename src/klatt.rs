@@ -10,7 +10,7 @@
 //! the glottis is open, via DF1 and DB1) through F5. Frication excites the
 //! parallel branch, whose resonators are normalized so that A2..A6 give the
 //! spectral peak level in dB relative to the flat bypass path AB. The 1980
-//! impulse-driven voice bar (AVS) is kept for voiced stop closures.
+//! impulse-driven voice bar (AVS) is kept for stop closures.
 
 use std::f64::consts::PI;
 

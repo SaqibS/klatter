@@ -194,53 +194,6 @@ impl AntiResonator {
     }
 }
 
-/// Eloquence renders at 11025 Hz, so the reference voice has almost no energy
-/// above its 5.5 kHz Nyquist; fricative energy up there reads as hiss.
-const OUTPUT_CUTOFF_HZ: f64 = 5400.0;
-/// Pole-pair Q values of an 8th-order Butterworth low-pass.
-const BUTTERWORTH_8_Q: [f64; 4] = [0.5098, 0.6013, 0.9000, 2.5629];
-
-#[derive(Clone, Copy, Default, Debug)]
-struct Biquad {
-    b0: f64,
-    b1: f64,
-    b2: f64,
-    a1: f64,
-    a2: f64,
-    x1: f64,
-    x2: f64,
-    y1: f64,
-    y2: f64,
-}
-
-impl Biquad {
-    fn lowpass(f: f64, q: f64, sr: f64) -> Self {
-        let w = 2.0 * PI * f / sr;
-        let alpha = w.sin() / (2.0 * q);
-        let a0 = 1.0 + alpha;
-        let b1 = (1.0 - w.cos()) / a0;
-        Biquad {
-            b0: b1 / 2.0,
-            b1,
-            b2: b1 / 2.0,
-            a1: -2.0 * w.cos() / a0,
-            a2: (1.0 - alpha) / a0,
-            ..Default::default()
-        }
-    }
-
-    fn tick(&mut self, x: f64) -> f64 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
-            - self.a1 * self.y1
-            - self.a2 * self.y2;
-        self.x2 = self.x1;
-        self.x1 = x;
-        self.y2 = self.y1;
-        self.y1 = y;
-        y
-    }
-}
-
 fn db_to_lin(db: f64) -> f64 {
     if db <= 0.0 {
         0.0
@@ -465,7 +418,6 @@ pub struct Synth {
     voice_rad: Radiation,
     bar_rad: Radiation,
     noise_rad: Radiation,
-    output_lowpass: Vec<Biquad>,
 }
 
 impl Synth {
@@ -494,14 +446,6 @@ impl Synth {
             voice_rad: Radiation::default(),
             bar_rad: Radiation::default(),
             noise_rad: Radiation::default(),
-            output_lowpass: if OUTPUT_CUTOFF_HZ < 0.45 * sr {
-                BUTTERWORTH_8_Q
-                    .iter()
-                    .map(|&q| Biquad::lowpass(OUTPUT_CUTOFF_HZ, q, sr))
-                    .collect()
-            } else {
-                Vec::new()
-            },
         };
         s.tilt.bypass();
         s.rgp_bar.set(0.0, 100.0, sr);
@@ -625,11 +569,7 @@ impl Synth {
                     let sign = if k % 2 == 0 { -1.0 } else { 1.0 };
                     parallel += sign * self.parallel[k].tick(fric * pa[k]);
                 }
-                let mut y = cascade + parallel * PARALLEL_GAIN;
-                for stage in &mut self.output_lowpass {
-                    y = stage.tick(y);
-                }
-                out.push(y);
+                out.push(cascade + parallel * PARALLEL_GAIN);
             }
         }
         out

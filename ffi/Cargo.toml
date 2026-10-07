@@ -1,0 +1,11 @@
+[package]
+name = "klatter-ffi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "klatter"
+crate-type = ["cdylib"]
+
+[dependencies]
+engine = { package = "klatter", path = ".." }

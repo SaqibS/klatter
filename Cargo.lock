@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "klatter"
 version = "0.1.0"
+
+[[package]]
+name = "klatter-ffi"
+version = "0.1.0"
+dependencies = [
+ "klatter",
+]

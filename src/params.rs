@@ -21,6 +21,8 @@ const NASAL_ZERO_HZ: f64 = 450.0;
 /// it; that nasalization is the main cue to a nasal coda ("bank" vs "back").
 const NASALIZE_BEFORE_MS: f64 = 30.0;
 const NASALIZE_AFTER_MS: f64 = 30.0;
+/// Affricates need most of their time as frication, or CH is heard as T.
+const AFFRICATE_RELEASE_SHARE: f64 = 0.65;
 
 /// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
 /// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII).
@@ -382,7 +384,7 @@ pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) 
             }
             Class::Stop | Class::Affricate => {
                 let release = if ph.class() == Class::Affricate {
-                    len / 2
+                    (len as f64 * AFFRICATE_RELEASE_SHARE).round() as usize
                 } else {
                     release_frames(ph).min(len.saturating_sub(1)).max(1)
                 };

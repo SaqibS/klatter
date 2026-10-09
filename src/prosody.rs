@@ -107,6 +107,8 @@ const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.8;
 /// Closures stay short, while fricatives need time to carry their noise cue.
 const STOP_FACTOR: f64 = 0.8;
 const FRICATIVE_FACTOR: f64 = 0.95;
+/// Affricates keep the stop's closure and add a fricative's worth of noise.
+const AFFRICATE_FACTOR: f64 = 1.2;
 
 /// Klatt's value is 1.4, but final vowels already escape non-final shortening
 /// and get the full postvocalic effect, so 1.4 drawls them; Eloquence marks
@@ -198,7 +200,9 @@ pub fn assign_durations(segs: &mut [Seg]) {
         segs[i].dur_ms = (inh - min) * prcnt + min;
         if ph.class() == Class::Fricative {
             segs[i].dur_ms *= FRICATIVE_FACTOR;
-        } else if matches!(ph.class(), Class::Stop | Class::Affricate) {
+        } else if ph.class() == Class::Affricate {
+            segs[i].dur_ms *= AFFRICATE_FACTOR;
+        } else if ph.class() == Class::Stop {
             segs[i].dur_ms *= STOP_FACTOR;
         }
     }

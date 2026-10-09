@@ -17,6 +17,12 @@ const CROSS_FADE_FRAMES: usize = 5;
 /// Fades run from this inaudible level so they span only the audible range.
 const FADE_FLOOR_DB: f64 = 30.0;
 const NASAL_ZERO_HZ: f64 = 450.0;
+/// Vowels are nasalized as the velum opens ahead of a nasal and closes after
+/// it; that nasalization is the main cue to a nasal coda ("bank" vs "back").
+const NASALIZE_BEFORE_MS: f64 = 30.0;
+const NASALIZE_AFTER_MS: f64 = 30.0;
+/// Affricates need most of their time as frication, or CH is heard as T.
+const AFFRICATE_RELEASE_SHARE: f64 = 0.65;
 
 /// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
 /// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII).
@@ -378,7 +384,7 @@ pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) 
             }
             Class::Stop | Class::Affricate => {
                 let release = if ph.class() == Class::Affricate {
-                    len / 2
+                    (len as f64 * AFFRICATE_RELEASE_SHARE).round() as usize
                 } else {
                     release_frames(ph).min(len.saturating_sub(1)).max(1)
                 };
@@ -403,6 +409,7 @@ pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) 
     }
 
     cross_fade(segs, starts, lens, &mut frames);
+    nasalize_vowels(segs, starts, lens, &mut frames);
 
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
@@ -427,6 +434,39 @@ pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) 
         }
     }
     frames
+}
+
+/// Separates the nasal pole-zero pair over the end of a vowel before a nasal
+/// and the start of one after it.
+fn nasalize_vowels(segs: &[Seg], starts: &[usize], lens: &[usize], frames: &mut [Frame]) {
+    let is_nasal = |j: usize| {
+        segs.get(j)
+            .and_then(|s| s.ph)
+            .is_some_and(|p| p.class() == Class::Nasal)
+    };
+    for i in 0..segs.len() {
+        if !segs[i].ph.is_some_and(Ph::is_vowel) {
+            continue;
+        }
+        let vowel = &mut frames[starts[i]..starts[i] + lens[i]];
+        let len = vowel.len();
+        if is_nasal(i + 1) {
+            let n = ms(NASALIZE_BEFORE_MS).min(len);
+            for k in 0..n {
+                let t = (k + 1) as f64 / (n + 1) as f64;
+                vowel[len - n + k].fnz = lerp(vowel[len - n + k].fnz, NASAL_ZERO_HZ, t);
+            }
+        }
+        if i > 0 && is_nasal(i - 1) {
+            let n = ms(NASALIZE_AFTER_MS).min(len);
+            for k in 0..n {
+                let t = 1.0 - (k + 1) as f64 / (n + 1) as f64;
+                vowel[k].fnz = vowel[k]
+                    .fnz
+                    .max(lerp(Frame::default().fnz, NASAL_ZERO_HZ, t));
+            }
+        }
+    }
 }
 
 /// Smooths voicing and fricative noise across segment boundaries. Stop and
@@ -682,6 +722,27 @@ mod tests {
         let last = frames[starts[vowel] + lens[vowel] - 1];
         assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
         assert!(last.av > 0.0);
+    }
+
+    #[test]
+    fn vowel_is_nasalized_toward_a_following_nasal() {
+        let (segs, starts, lens, frames) = frames_for("ban");
+        let vowel = segs.iter().position(|s| s.ph == Some(Ph::AE)).unwrap();
+        let first = frames[starts[vowel]].fnz;
+        let last = frames[starts[vowel] + lens[vowel] - 1].fnz;
+        assert_eq!(first, Frame::default().fnz);
+        assert!(last > first && last < NASAL_ZERO_HZ, "{first} -> {last}");
+    }
+
+    #[test]
+    fn vowel_before_a_stop_is_not_nasalized() {
+        let (segs, starts, lens, frames) = frames_for("bat");
+        let vowel = segs.iter().position(|s| s.ph == Some(Ph::AE)).unwrap();
+        assert!(
+            frames[starts[vowel]..starts[vowel] + lens[vowel]]
+                .iter()
+                .all(|f| f.fnz == Frame::default().fnz)
+        );
     }
 
     #[test]

@@ -107,6 +107,8 @@ const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.8;
 /// Closures stay short, while fricatives need time to carry their noise cue.
 const STOP_FACTOR: f64 = 0.8;
 const FRICATIVE_FACTOR: f64 = 0.95;
+/// Affricates keep the stop's closure and add a fricative's worth of noise.
+const AFFRICATE_FACTOR: f64 = 1.2;
 
 /// Klatt's value is 1.4, but final vowels already escape non-final shortening
 /// and get the full postvocalic effect, so 1.4 drawls them; boundaries
@@ -198,7 +200,9 @@ pub fn assign_durations(segs: &mut [Seg]) {
         segs[i].dur_ms = (inh - min) * prcnt + min;
         if ph.class() == Class::Fricative {
             segs[i].dur_ms *= FRICATIVE_FACTOR;
-        } else if matches!(ph.class(), Class::Stop | Class::Affricate) {
+        } else if ph.class() == Class::Affricate {
+            segs[i].dur_ms *= AFFRICATE_FACTOR;
+        } else if ph.class() == Class::Stop {
             segs[i].dur_ms *= STOP_FACTOR;
         }
     }
@@ -292,8 +296,32 @@ pub fn f0_contour(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f64)
         let end = starts[i - 1] + lens[i - 1];
         smooth(&mut f0[begin..end], 9);
     }
+    add_microprosody(segs, starts, lens, frame_ms, &mut f0);
     add_flutter(&mut f0, frame_ms);
     f0
+}
+
+/// Consonants perturb the F0 of the sonorant after them: a voiceless one
+/// raises its onset and a voiced one lowers it. Listeners use this as a
+/// voicing cue, and its absence is part of what makes synthetic pitch sound
+/// drawn with a ruler.
+fn add_microprosody(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f64, f0: &mut [f64]) {
+    const RAISE: f64 = 0.08;
+    const LOWER: f64 = 0.04;
+    const DECAY_MS: f64 = 50.0;
+    let decay = (DECAY_MS / frame_ms) as usize;
+    for i in 1..segs.len() {
+        let (Some(p), Some(v)) = (segs[i - 1].ph, segs[i].ph) else {
+            continue;
+        };
+        if !v.is_sonorant() || p.is_sonorant() {
+            continue;
+        }
+        let shift = if p.is_voiced() { -LOWER } else { RAISE };
+        for k in 0..decay.min(lens[i]) {
+            f0[starts[i] + k] *= 1.0 + shift * (1.0 - k as f64 / decay as f64);
+        }
+    }
 }
 
 fn clause_contour(
@@ -543,5 +571,26 @@ mod tests {
                 f0[end]
             );
         }
+    }
+
+    #[test]
+    fn voiceless_onset_raises_and_voiced_onset_lowers_vowel_pitch() {
+        let mut segs = build(&normalize("a pa ba"));
+        assign_durations(&mut segs);
+        let lens: Vec<usize> = segs
+            .iter()
+            .map(|s| (s.dur_ms / 5.0).round().max(1.0) as usize)
+            .collect();
+        let mut starts = vec![0; lens.len()];
+        for k in 1..lens.len() {
+            starts[k] = starts[k - 1] + lens[k - 1];
+        }
+        let base = f0_contour(&segs, &starts, &lens, 5.0);
+        let mut f0 = base.clone();
+        add_microprosody(&segs, &starts, &lens, 5.0, &mut f0);
+        let onset = |ph: Ph| starts[segs.iter().position(|s| s.ph == Some(ph)).unwrap() + 1];
+        let (p, b) = (onset(Ph::P), onset(Ph::B));
+        assert!(f0[p] > base[p] && f0[b] < base[b]);
+        assert_eq!(f0[p + 20], base[p + 20]);
     }
 }

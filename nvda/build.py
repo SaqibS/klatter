@@ -23,6 +23,7 @@ def main():
         for path in sorted(ADDON.rglob("*")):
             if path.is_file() and "__pycache__" not in path.parts:
                 z.write(path, path.relative_to(ADDON).as_posix())
+        z.write(ROOT / "data" / "cmudict" / "LICENSE.txt", "synthDrivers/klatter/cmudict-LICENSE.txt")
     print(out)
 
 

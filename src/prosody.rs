@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn consonant_between_consonants_gets_cluster_shortening() {
-        let d = durations("extra cat");
+        let d = durations("extreme cat");
         let s = d.iter().find(|(p, _)| *p == Ph::S).unwrap().1;
         let (inh, min) = Ph::S.durations();
         let expected = ((inh - min) * 0.85 * 0.5 + min) * FRICATIVE_FACTOR;

@@ -46,13 +46,17 @@ fn run(input: &str, render: Option<(f64, &str)>) -> io::Result<()> {
         prosody::scale_durations(&mut segs, scale);
     }
     let (starts, lens) = params::frame_layout(&segs);
-    if let Some((_, output)) = render {
-        let frames = params::build_frames_with_layout(&segs, &starts, &lens);
-        let raw = klatt::Synth::new(16000).render(&frames);
-        let peak = raw.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        let gain = if peak > 0.0 { 29000.0 / peak } else { 0.0 };
-        let pcm: Vec<i16> = raw.iter().map(|x| (x * gain) as i16).collect();
-        wav::write_wav(BufWriter::new(std::fs::File::create(output)?), &pcm, 16000)?;
+    if let Some((scale, output)) = render {
+        let voice = Voice {
+            wpm: DEFAULT_WPM / scale,
+            ..Voice::default()
+        };
+        let speech = speak(&[Item::Text(&text)], DEFAULT_SAMPLE_RATE, &voice);
+        wav::write_wav(
+            BufWriter::new(std::fs::File::create(output)?),
+            &speech.samples,
+            DEFAULT_SAMPLE_RATE,
+        )?;
     }
 
     let mut out = BufWriter::new(io::stdout().lock());

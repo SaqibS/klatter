@@ -285,12 +285,12 @@ fn is_voiceless(p: Option<Ph>) -> bool {
 /// Klatt & Klatt (1990) found breathiness rises toward vowel offsets into
 /// silence and near voiceless consonants, and is greater in unstressed and
 /// sentence-final syllables.
-fn breathiness(segs: &[Seg], i: usize, len: usize) -> Vec<(f64, f64)> {
+fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64, f64)> {
     let s = &segs[i];
     let prev = if i > 0 { segs[i - 1].ph } else { None };
     let next = segs.get(i + 1).and_then(|n| n.ph);
     let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
-    let frames = |ms: f64| (ms / FRAME_MS).max(1.0);
+    let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
     let mut floor: f64 = 0.0;
     if s.stress == 0 || s.function_word {
         floor = 0.15;
@@ -341,6 +341,16 @@ pub fn build_frames(segs: &[Seg]) -> Vec<Frame> {
 
 /// Builds frames using the layout returned by [`frame_layout`] for these segments.
 pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Frame> {
+    build_frames_with_breathiness_scale(segs, starts, lens, 1.0)
+}
+
+/// Fixed-length breathiness ramps would cover entire vowels at fast rates.
+pub(crate) fn build_frames_with_breathiness_scale(
+    segs: &[Seg],
+    starts: &[usize],
+    lens: &[usize],
+    breathiness_scale: f64,
+) -> Vec<Frame> {
     assert_eq!(segs.len(), starts.len());
     assert_eq!(segs.len(), lens.len());
     let formants = formant_tracks(segs, starts, lens);
@@ -426,11 +436,40 @@ pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) 
         if !segs[i].ph.is_some_and(Ph::is_sonorant) {
             continue;
         }
-        let b = breathiness(segs, i, lens[i]);
+        let b = breathiness(segs, i, lens[i], breathiness_scale);
         for (fr, b) in frames[starts[i]..starts[i] + lens[i]].iter_mut().zip(b) {
             if fr.av > 0.0 {
                 apply_voice_quality(fr, b.0, b.1);
             }
+        }
+    }
+    let half = CROSS_FADE_FRAMES / 2;
+    for i in 0..segs.len() {
+        if segs[i].ph.is_some() {
+            continue;
+        }
+        let start = starts[i];
+        // A new pulse in a pause misses the sonorant's breathy offset.
+        for fr in &mut frames[start..start + lens[i]] {
+            fr.av = 0.0;
+        }
+        if i == 0 {
+            continue;
+        }
+        // Retuning the tract or tilt while the last pulse decays can click.
+        // Reserve only the next sound's cross-fade for its own settings.
+        let last = frames[start - 1];
+        let hold = if i + 1 == segs.len() {
+            lens[i]
+        } else {
+            lens[i].saturating_sub(half)
+        };
+        for fr in &mut frames[start..start + hold] {
+            fr.f = last.f;
+            fr.b = last.b;
+            fr.tl = last.tl;
+            fr.oq = last.oq;
+            fr.fnz = last.fnz;
         }
     }
     frames
@@ -553,6 +592,46 @@ mod tests {
     }
 
     #[test]
+    fn pauses_do_not_start_voicing_or_retune_the_ringing_tract() {
+        for text in ["Or Australia? And she tried.", "man. see."] {
+            for scale in [1.0, 0.5, 1.0 / 3.0] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_breathiness_scale(&segs, &starts, &lens, scale);
+                for i in 0..segs.len() {
+                    if segs[i].ph.is_some() {
+                        continue;
+                    }
+                    let pause = &frames[starts[i]..starts[i] + lens[i]];
+                    assert!(
+                        pause.iter().all(|fr| fr.av == 0.0),
+                        "{text}, scale {scale}: pause {i} voices"
+                    );
+                    if i == 0 {
+                        continue;
+                    }
+                    let last = frames[starts[i] - 1];
+                    let half = CROSS_FADE_FRAMES / 2;
+                    let hold = if i + 1 == segs.len() {
+                        lens[i]
+                    } else {
+                        lens[i].saturating_sub(half)
+                    };
+                    for fr in &pause[..hold] {
+                        assert_eq!(
+                            (fr.f, fr.b, fr.tl, fr.oq, fr.fnz),
+                            (last.f, last.b, last.tl, last.oq, last.fnz),
+                            "{text}, scale {scale}: pause {i} retunes the ringing tract"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn layout_covers_all_frames() {
         let (_, starts, lens, frames) = frames_for("Hello there, how are you?");
         assert_eq!(starts.last().unwrap() + lens.last().unwrap(), frames.len());
@@ -598,7 +677,7 @@ mod tests {
                 let budgets: Vec<f64> = segs.iter().map(|s| s.aspiration_ms).collect();
                 prosody::scale_durations(&mut segs, scale);
                 let (starts, lens) = frame_layout(&segs);
-                let frames = build_frames_with_layout(&segs, &starts, &lens);
+                let frames = build_frames_with_breathiness_scale(&segs, &starts, &lens, scale);
                 for i in 1..segs.len() {
                     assert_eq!(segs[i].aspiration_ms, budgets[i] * scale);
                     if budgets[i] == 0.0 {
@@ -617,6 +696,26 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn faster_speech_does_not_spread_breathiness_across_the_vowel() {
+        let mut segs = build(&normalize("bee"));
+        assign_durations(&mut segs);
+        for s in &mut segs {
+            s.dur_ms = 180.0;
+        }
+        let vowel = segs.iter().position(|s| s.ph == Some(Ph::IY)).unwrap();
+        let natural = breathiness(&segs, vowel, 36, 1.0);
+        let fast = breathiness(&segs, vowel, 12, 1.0 / 3.0);
+        for (k, &(b, offset)) in fast.iter().enumerate() {
+            let corresponding = natural[k * 3];
+            assert!((b - corresponding.0).abs() < 1e-12, "frame {k}: {b}");
+            assert!(
+                (offset - corresponding.1).abs() < 1e-12,
+                "frame {k}: {offset}"
+            );
         }
     }
 

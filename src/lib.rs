@@ -157,7 +157,7 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
     let scale = DEFAULT_WPM / voice.wpm;
     prosody::scale_durations(&mut segs, scale);
     let (starts, lens) = params::frame_layout(&segs);
-    let mut frames = params::build_frames_with_layout(&segs, &starts, &lens);
+    let mut frames = params::build_frames_with_breathiness_scale(&segs, &starts, &lens, scale);
     let pitch_scale = voice.pitch_hz / prosody::BASE_F0;
     for f in &mut frames {
         // Written so the natural settings leave F0 bit-for-bit unchanged.
@@ -246,6 +246,32 @@ mod tests {
             assert!(
                 (len * factor / normal - 1.0).abs() < 0.1,
                 "{factor}: {len} vs {normal}"
+            );
+        }
+    }
+
+    #[test]
+    fn faster_voice_preserves_a_less_breathy_vowel_core() {
+        let least_breathy = |wpm| {
+            frames(
+                "bee",
+                Voice {
+                    wpm,
+                    ..Voice::default()
+                },
+            )
+            .iter()
+            .filter(|f| f.av > 50.0)
+            .map(|f| f.oq)
+            .reduce(f64::min)
+            .expect("voiced vowel")
+        };
+        let natural = least_breathy(DEFAULT_WPM);
+        for factor in [2.0, 3.0] {
+            let fast = least_breathy(DEFAULT_WPM * factor);
+            assert!(
+                (fast - natural).abs() < 1.0,
+                "{factor}x: open quotient {fast}, natural {natural}"
             );
         }
     }

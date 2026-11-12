@@ -22,7 +22,7 @@ target\release\klatter in.txt out.wav
 target\release\klatter -r 300 in.txt out.wav
 ```
 
-The rate is in words per minute, as with `say -r` (`--rate=300` also works); the default is Klatter's natural rate of 220. Every segment and pause scales by the same factor.
+The rate is in words per minute, as with `say -r` (`--rate=300` also works); the default is Klatter's natural rate of 220. Every segment and pause scales by the same factor. Breathiness ramps scale with the rate so they do not spread across entire vowels at fast rates. Other acoustic transition timings retain their nominal durations, constrained by the available segment frames.
 
 The output is a 16 kHz, 16-bit mono WAV file at a fixed gain, so short and long utterances keep their natural relative loudness. Repeated calls to `klatt::Synth::render` on the same synthesizer preserve both synthesis state and fractional-sample timing, so rendering frames in chunks produces the same samples as rendering them together. The project uses no third-party crates.
 
@@ -63,9 +63,13 @@ This writes `target\klatter-<version>.nvda-addon`; open it to install it in NVDA
 7. `lib.rs` applies the voice settings: it scales durations for the rate and reshapes the F0 contour for pitch and inflection before synthesis, then applies the gain and volume.
 8. `wav.rs` writes the WAV file.
 
+Pauses do not restart voicing, and retain the preceding sound's formants, nasalization and tilt while it decays, until the next onset needs its own settings. The synthesizer interpolates cascade formant frequencies and bandwidths sample by sample between parameter frames, including across rendering calls, so changing a ringing filter does not introduce a sudden coefficient step.
+
 ## Regression coverage
 
 Regression tests cover consonant-cluster shortening, terminal intonation in unaccented clauses, aspiration and offglide timing, typographic apostrophes, grouped and negative numbers, plural roots and stress preservation, the AW vowel in DOWN and its inflections, and incremental rendering at fractional samples per frame. Rendering chunk sizes are checked for exact waveform equivalence. These checks establish correctness of the specified behaviors, not perceived voice quality.
+
+Rate-specific checks cover the relative timing of breathy offsets and preservation of a less breathy vowel core at faster rates. Pause tests check that voicing does not leak into pauses and that ringing tract settings are retained. Source tests cover abrupt formant-change transients and check that open-glottis modulation follows the decimation filter's delay, keeping noise modulation and open-phase formant changes aligned with the glottal flow at different pitches and sample rates.
 
 ## Voice metrics
 
@@ -84,6 +88,8 @@ python tools\eloquence\align.py work work\candidate.wav
 ```
 
 The scripts in `tools\eloquence` measure how a Klatter rendering differs from a recording of another synthesizer reading the same text; the current tuning targets ETI-Eloquence. `segdump` lists our segments and their times, `asr_words.ps1` finds word times in the reference with Windows speech recognition, and `align.py` anchors runs of matching words and maps each of our segments onto the reference timeline. The analysis scripts then each take the work folder and an optional rendering: `vowels.py` and `cons.py` compare formants and band levels per phoneme, `stops.py` closure depth, `durs.py` and `classfit.py` durations, `vresid.py` vowel spectra, `vlevel.py` relative vowel loudness, and `bjump.py` how abruptly the spectrum changes at segment boundaries. They require Python with numpy; the reference recording is not included.
+
+When rendering with `segdump`'s optional scale and output arguments, the audio uses the same synthesis path and fixed gain as the CLI and screen-reader interface.
 
 ## Known limitations
 

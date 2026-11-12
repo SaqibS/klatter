@@ -272,6 +272,7 @@ struct GlottalSource {
     modify_pulse: bool,
     taps: [f64; DECIMATION_TAPS],
     history: [f64; DECIMATION_TAPS],
+    open_history: [bool; DECIMATION_TAPS],
     head: usize,
 }
 
@@ -301,6 +302,7 @@ impl GlottalSource {
             modify_pulse: false,
             taps,
             history: [0.0; DECIMATION_TAPS],
+            open_history: [false; DECIMATION_TAPS],
             head: 0,
         }
     }
@@ -338,10 +340,13 @@ impl GlottalSource {
                 started = Some(self.period_len as f64 / OVERSAMPLE as f64);
             }
             self.history[self.head] = self.pulse.flow(self.pos);
+            self.open_history[self.head] = self.pulse.is_open(self.pos);
             self.head = (self.head + 1) % DECIMATION_TAPS;
             self.pos += 1;
         }
-        let open = self.pulse.is_open(self.pos - 1);
+        // The linear-phase decimation filter delays the flow by half its
+        // length, so the open phase reported with it must be delayed alike.
+        let open = self.open_history[(self.head + DECIMATION_TAPS / 2) % DECIMATION_TAPS];
         let flow = (0..DECIMATION_TAPS)
             .map(|k| self.taps[k] * self.history[(self.head + k) % DECIMATION_TAPS])
             .sum();
@@ -427,6 +432,7 @@ pub struct Synth {
     voice_rad: Radiation,
     bar_rad: Radiation,
     noise_rad: Radiation,
+    last_frame: Option<Frame>,
 }
 
 impl Synth {
@@ -456,6 +462,7 @@ impl Synth {
             voice_rad: Radiation::default(),
             bar_rad: Radiation::default(),
             noise_rad: Radiation::default(),
+            last_frame: None,
         };
         s.tilt.bypass();
         s.rgp_bar.set(0.0, 100.0, sr);
@@ -510,6 +517,25 @@ impl Synth {
         }
     }
 
+    fn glide_formants(&mut self, previous: &Frame, fr: &Frame, t: f64) {
+        let at = |a: f64, b: f64| a + (b - a) * t;
+        let f1 = at(previous.f[0], fr.f[0]);
+        let b1 = at(previous.b[0], fr.b[0]);
+        self.f1_closed.set(f1, b1, self.sr);
+        self.f1_open.set(
+            f1 + at(previous.df1, fr.df1),
+            b1 + at(previous.db1, fr.db1),
+            self.sr,
+        );
+        for k in 1..3 {
+            self.cascade[k].set(
+                at(previous.f[k], fr.f[k]),
+                at(previous.b[k], fr.b[k]),
+                self.sr,
+            );
+        }
+    }
+
     /// One output sample of the radiated sources: (tilted voicing plus voice
     /// bar, noise, glottis open).
     fn excite(&mut self, fr: &Frame, av: f64, avs: f64, voiced: bool) -> (f64, f64, bool) {
@@ -545,6 +571,11 @@ impl Synth {
         let spf = self.sr * FRAME_MS / 1000.0;
         let mut out = Vec::with_capacity((frames.len() as f64 * spf) as usize + 1);
         for fr in frames {
+            let previous = self.last_frame.unwrap_or(*fr);
+            let moving = previous.f != fr.f
+                || previous.b != fr.b
+                || previous.df1 != fr.df1
+                || previous.db1 != fr.db1;
             self.configure(fr);
             // Integer accounting avoids drift at rates with fractional samples per frame.
             self.sample_remainder += self.sr as u64;
@@ -557,7 +588,11 @@ impl Synth {
             let ab = db_to_lin(fr.ab);
             let pa: [f64; 5] = std::array::from_fn(|k| db_to_lin(fr.a[k]) * self.parallel_norm[k]);
             let voiced = av > 0.0 || avs > 0.0;
-            for _ in 0..n {
+            for i in 0..n {
+                // Stepping a ringing resonator's coefficients injects a transient.
+                if moving {
+                    self.glide_formants(&previous, fr, (i + 1) as f64 / n as f64);
+                }
                 let (voice, noise, open) = self.excite(fr, av, avs, voiced);
 
                 let mut breath = noise * ah;
@@ -591,6 +626,7 @@ impl Synth {
                 }
                 out.push(cascade + parallel * PARALLEL_GAIN);
             }
+            self.last_frame = Some(*fr);
         }
         out
     }
@@ -649,6 +685,35 @@ mod tests {
         assert!(at_f1 > away * 3.0, "F1 {at_f1} vs trough {away}");
         let at_f2 = dft_mag(tail, 1200.0, sr);
         assert!(at_f2 > away, "F2 {at_f2} vs trough {away}");
+    }
+
+    #[test]
+    fn formant_changes_do_not_step_the_first_sample() {
+        let from = Frame {
+            f0: 100.0,
+            av: 60.0,
+            f: [350.0, 1100.0, 2600.0],
+            ..Frame::default()
+        };
+        let to = Frame {
+            f: [700.0, 2200.0, 2800.0],
+            b: [200.0, 150.0, 250.0],
+            ..from
+        };
+        for sr in [16000, 22050, 48000] {
+            let mut synth = Synth::new(sr);
+            let before = synth.render(&[from; 37]);
+            let peak = before.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            let changed = synth.render(&[to]);
+            let mut control = Synth::new(sr);
+            control.render(&[from; 37]);
+            let unchanged = control.render(&[from]);
+            let step = (changed[0] - unchanged[0]).abs();
+            assert!(
+                step < 0.05 * peak,
+                "{sr} Hz: first-sample step {step:.6}, steady peak {peak:.6}"
+            );
+        }
     }
 
     #[test]
@@ -755,6 +820,13 @@ mod tests {
                 tl: (i % 20) as f64,
                 af: if i % 9 >= 6 { 55.0 } else { 0.0 },
                 ab: 50.0,
+                f: [
+                    400.0 + (i % 17) as f64 * 10.0,
+                    1200.0 + (i % 13) as f64 * 25.0,
+                    2500.0,
+                ],
+                b: [70.0 + (i % 11) as f64 * 3.0, 90.0, 150.0],
+                df1: if i % 7 < 3 { 30.0 } else { 0.0 },
                 ..Frame::default()
             })
             .collect();
@@ -821,6 +893,51 @@ mod tests {
             for sr in [22050, 44100, 48000] {
                 let db = 20.0 * (rms(frame, sr) / reference).log10();
                 assert!(db.abs() < 1.5, "{name} at {sr} Hz: {db:.2} dB");
+            }
+        }
+    }
+
+    #[test]
+    fn open_phase_flag_tracks_filtered_glottal_flow() {
+        // The flag that gates noise and DF1 must mark when the decimated flow
+        // passes, whose t^2(1-t) pulse has its centroid at 0.6 of the open phase.
+        for sr in [16000.0, 48000.0] {
+            for f0 in [100.0, 220.0] {
+                let fr = Frame {
+                    f0,
+                    av: 60.0,
+                    ..Frame::default()
+                };
+                let mut src = GlottalSource::new();
+                let ticks: Vec<_> = (0..sr as usize / 2)
+                    .map(|_| src.tick(&fr, 1.0, sr))
+                    .collect();
+                let starts: Vec<usize> =
+                    (0..ticks.len()).filter(|&i| ticks[i].2.is_some()).collect();
+                let offsets: Vec<f64> = starts[2..]
+                    .windows(2)
+                    .map(|w| {
+                        let period = &ticks[w[0]..w[1]];
+                        let open: Vec<f64> = (0..period.len())
+                            .filter(|&i| period[i].1)
+                            .map(|i| i as f64)
+                            .collect();
+                        let window_centre = open.iter().sum::<f64>() / open.len() as f64;
+                        let mass: f64 = period.iter().map(|t| t.0).sum();
+                        let centroid = period
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| i as f64 * t.0)
+                            .sum::<f64>()
+                            / mass;
+                        (centroid - window_centre) / open.len() as f64
+                    })
+                    .collect();
+                let offset = offsets.iter().sum::<f64>() / offsets.len() as f64;
+                assert!(
+                    (offset - 0.1).abs() < 0.03,
+                    "{sr} Hz, F0 {f0}: flow centroid at {offset:.3} of open phase"
+                );
             }
         }
     }

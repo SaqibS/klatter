@@ -240,6 +240,10 @@ mod tests {
     fn ambiguous_plurals_use_known_roots() {
         assert_eq!(root("BUSES").as_deref(), Some("BUS"));
         assert_eq!(root("GASES").as_deref(), Some("GAS"));
+        assert_eq!(root("YESES").as_deref(), Some("YES"));
+        assert_eq!(root("DOLLARSES").as_deref(), Some("DOLLARS"));
+        assert_eq!(root("SAYSES").as_deref(), Some("SAYS"));
+        assert_eq!(root("DENNISES").as_deref(), Some("DENNIS"));
         assert_eq!(root("LOSES").as_deref(), Some("LOSE"));
         assert_eq!(root("ROSES").as_deref(), Some("ROSE"));
         assert_eq!(root("NOSES").as_deref(), Some("NOSE"));

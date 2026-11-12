@@ -7,6 +7,18 @@ use crate::morph::{self, Suffix};
 use crate::phoneme::Ph;
 use crate::text::{Break, Token};
 
+// Citation-form stress should not give every function word its own accent.
+const FUNCTION_WORDS: &[&str] = &[
+    "A", "AM", "AN", "AND", "ARE", "AS", "AT", "BE", "BEEN", "BUT", "BY", "CAN", "COULD", "DID",
+    "DO", "DOES", "EACH", "FOR", "FROM", "HAD", "HAS", "HAVE", "HE", "HER", "HIM", "HIS", "HOW",
+    "I", "I'D", "I'LL", "I'M", "I'VE", "IF", "IN", "INTO", "IS", "IT", "IT'S", "ITS", "MAY", "ME",
+    "MUST", "MY", "NOR", "OF", "ON", "ONTO", "OR", "OUR", "SHALL", "SHE", "SHOULD", "SO", "SOME",
+    "THAN", "THAT", "THAT'S", "THE", "THEIR", "THEM", "THEN", "THERE", "THESE", "THEY", "THEY'RE",
+    "THIS", "THOSE", "THROUGH", "TO", "UP", "US", "WAS", "WE", "WE'RE", "WERE", "WHAT", "WHEN",
+    "WHERE", "WHICH", "WHO", "WHOM", "WHOSE", "WHY", "WILL", "WITH", "WOULD", "YOU", "YOU'RE",
+    "YOUR",
+];
+
 #[derive(Clone, Debug)]
 pub struct Seg {
     /// `None` is a pause.
@@ -53,6 +65,16 @@ impl Seg {
 }
 
 pub fn pronounce(word: &str) -> Vec<(Ph, u8)> {
+    let mut phones = word_pronunciation(word);
+    if FUNCTION_WORDS.contains(&word) {
+        for (_, stress) in &mut phones {
+            *stress = 0;
+        }
+    }
+    phones
+}
+
+fn word_pronunciation(word: &str) -> Vec<(Ph, u8)> {
     if let Some(entry) = lexicon::lookup_phones(word) {
         return entry.to_vec();
     }
@@ -261,11 +283,16 @@ mod tests {
     }
 
     #[test]
-    fn hand_overrides_preserve_pronunciation_and_function_word_stress() {
+    fn pronunciation_overrides_and_function_word_stress_are_independent() {
         use Ph::*;
         assert_eq!(pronounce("READ"), vec![(R, 0), (IY, 1), (D, 0)]);
         assert_eq!(pronounce("WAS"), vec![(W, 0), (AH, 0), (Z, 0)]);
-        for word in ["was", "the", "of"] {
+        assert_eq!(
+            lexicon::lookup("TO").unwrap(),
+            vec![("T".to_string(), 0), ("UW".to_string(), 1)]
+        );
+        assert_eq!(pronounce("TO"), vec![(T, 0), (UW, 0)]);
+        for word in ["to", "do", "she", "into", "you're", "was", "the", "of"] {
             let segs = build(&normalize(word));
             assert!(
                 segs.iter()
@@ -274,6 +301,15 @@ mod tests {
                 "{word}"
             );
         }
+    }
+
+    #[test]
+    fn derived_words_preserve_function_root_stress_rules() {
+        use Ph::*;
+        assert!(lexicon::cmudict_phones("COULDS").is_none());
+        assert!(lexicon::cmudict_phones("DOED").is_none());
+        assert_eq!(pronounce("COULDS"), vec![(K, 0), (UH, 0), (D, 0), (Z, 0)]);
+        assert_eq!(pronounce("DOED"), vec![(D, 0), (UW, 1), (D, 0)]);
     }
 
     #[test]

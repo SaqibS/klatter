@@ -286,7 +286,7 @@ mod tests {
     fn pronunciation_overrides_and_function_word_stress_are_independent() {
         use Ph::*;
         assert_eq!(pronounce("READ"), vec![(R, 0), (IY, 1), (D, 0)]);
-        assert_eq!(pronounce("WAS"), vec![(W, 0), (AH, 0), (Z, 0)]);
+        assert_eq!(pronounce("WAS"), vec![(W, 0), (AX, 0), (Z, 0)]);
         assert_eq!(
             lexicon::lookup("TO").unwrap(),
             vec![("T".to_string(), 0), ("UW".to_string(), 1)]
@@ -310,6 +310,20 @@ mod tests {
         assert!(lexicon::cmudict_phones("DOED").is_none());
         assert_eq!(pronounce("COULDS"), vec![(K, 0), (UH, 0), (D, 0), (Z, 0)]);
         assert_eq!(pronounce("DOED"), vec![(D, 0), (UW, 1), (D, 0)]);
+    }
+
+    #[test]
+    fn beautiful_has_a_reduced_ful_vowel() {
+        use Ph::*;
+        let segs = build(&normalize("beautiful"));
+        let phones: Vec<_> = segs.iter().filter_map(|s| s.ph).collect();
+        assert_eq!(phones, vec![B, Y, UW, T, IH, F, AX, L]);
+        let vowels: Vec<_> = segs
+            .iter()
+            .filter(|s| s.is_vowel())
+            .map(|s| (s.ph.unwrap(), s.stress))
+            .collect();
+        assert_eq!(vowels, vec![(UW, 1), (IH, 0), (AX, 0)]);
     }
 
     #[test]

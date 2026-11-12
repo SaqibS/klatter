@@ -56,6 +56,9 @@ pub fn pronounce(word: &str) -> Vec<(Ph, u8)> {
     if let Some(entry) = lexicon::lookup_phones(word) {
         return entry.to_vec();
     }
+    if let Some(entry) = lexicon::cmudict_phones(word) {
+        return entry;
+    }
     let split = match word.strip_suffix("'S").filter(|b| !b.is_empty()) {
         Some(base) => Some((base.to_string(), Suffix::S)),
         None => morph::split(word),
@@ -225,6 +228,98 @@ mod tests {
     use crate::text::normalize;
 
     #[test]
+    fn cmudict_supplies_irregular_words_through_normalization() {
+        use Ph::*;
+        for (text, expected) in [
+            ("colonel", vec![(K, 0), (ER, 1), (N, 0), (AX, 0), (L, 0)]),
+            ("yacht", vec![(Y, 0), (AA, 1), (T, 0)]),
+            ("queue", vec![(K, 0), (Y, 0), (UW, 1)]),
+            ("choir", vec![(K, 0), (W, 0), (AY, 1), (ER, 0)]),
+        ] {
+            let phones = pronounce(&text.to_uppercase());
+            assert_eq!(phones, expected, "{text}");
+            let segs = build(&normalize(text));
+            let actual: Vec<Ph> = segs.iter().filter_map(|s| s.ph).collect();
+            assert_eq!(
+                actual,
+                expected.iter().map(|p| p.0).collect::<Vec<_>>(),
+                "{text}"
+            );
+            assert_eq!(
+                segs.iter()
+                    .filter(|s| s.is_vowel())
+                    .map(|s| s.stress)
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .filter(|p| p.0.is_vowel())
+                    .map(|p| p.1)
+                    .collect::<Vec<_>>(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn hand_overrides_preserve_pronunciation_and_function_word_stress() {
+        use Ph::*;
+        assert_eq!(pronounce("READ"), vec![(R, 0), (IY, 1), (D, 0)]);
+        assert_eq!(pronounce("WAS"), vec![(W, 0), (AH, 0), (Z, 0)]);
+        for word in ["was", "the", "of"] {
+            let segs = build(&normalize(word));
+            assert!(
+                segs.iter()
+                    .filter(|s| s.ph.is_some())
+                    .all(|s| s.function_word && s.stress == 0),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_words_keep_rules_and_are_not_autocorrected() {
+        for (typo, word) in [
+            ("TEH", "THE"),
+            ("RECIEVE", "RECEIVE"),
+            ("WHCIH", "WHICH"),
+            ("BECUASE", "BECAUSE"),
+        ] {
+            assert!(lexicon::cmudict_phones(typo).is_none());
+            let phones = lts::letters_to_phonemes(typo);
+            assert_eq!(pronounce(typo), lts::assign_stress(typo, &phones), "{typo}");
+            assert_ne!(pronounce(typo), pronounce(word), "{typo}");
+        }
+    }
+
+    #[test]
+    fn unknown_inflections_keep_the_hand_lexicon_root() {
+        use Ph::*;
+        let root = vec![(K, 0), (L, 0), (AE, 1), (T, 0), (ER, 0)];
+        for (word, suffix) in [
+            ("KLATTER'S", vec![(Z, 0)]),
+            ("KLATTERS", vec![(Z, 0)]),
+            ("KLATTERED", vec![(D, 0)]),
+            ("KLATTERING", vec![(IH, 0), (NG, 0)]),
+        ] {
+            assert!(lexicon::cmudict_phones(word).is_none(), "{word}");
+            let mut expected = root.clone();
+            expected.extend(suffix);
+            assert_eq!(pronounce(word), expected, "{word}");
+        }
+    }
+
+    #[test]
+    fn unknown_inflections_can_use_a_cmudict_root() {
+        use Ph::*;
+        assert!(lexicon::lookup_phones("COLONEL").is_none());
+        assert!(lexicon::cmudict_phones("COLONELING").is_none());
+        assert_eq!(
+            pronounce("COLONELING"),
+            vec![(K, 0), (ER, 1), (N, 0), (AX, 0), (L, 0), (IH, 0), (NG, 0)]
+        );
+    }
+
+    #[test]
     fn possessive_follows_voicing_of_base() {
         let names = |w: &str| pronounce(w).iter().map(|p| p.0).collect::<Vec<_>>();
         assert_eq!(names("KLATT'S"), vec![Ph::K, Ph::L, Ph::AE, Ph::T, Ph::S]);
@@ -276,12 +371,12 @@ mod tests {
         use Ph::*;
         for (word, expected) in [
             ("BUSES", vec![B, AH, S, IH, Z]),
-            ("GASES", vec![G, AE, S, IH, Z]),
-            ("LOSES", vec![L, UW, Z, IH, Z]),
+            ("GASES", vec![G, AE, S, AX, Z]),
+            ("LOSES", vec![L, UW, Z, AX, Z]),
             ("USES", vec![Y, UW, Z, IH, Z]),
             ("ROSES", vec![R, OW, Z, IH, Z]),
-            ("BOXES", vec![B, AA, K, S, IH, Z]),
-            ("PLACES", vec![P, L, EY, S, IH, Z]),
+            ("BOXES", vec![B, AA, K, S, AX, Z]),
+            ("PLACES", vec![P, L, EY, S, AX, Z]),
             ("HOUSES", vec![HH, AW, Z, IH, Z]),
         ] {
             let actual: Vec<Ph> = pronounce(word).into_iter().map(|p| p.0).collect();
@@ -290,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn inflected_words_preserve_root_stress_and_vowels() {
+    fn dictionary_inflections_preserve_the_selected_reading_and_stress() {
         use Ph::*;
         for (word, expected) in [
             (
@@ -305,18 +400,40 @@ mod tests {
                 "ABUSES",
                 vec![(AX, 0), (B, 0), (Y, 0), (UW, 1), (Z, 0), (IH, 0), (Z, 0)],
             ),
+            ("ARISES", vec![(ER, 0), (AY, 1), (Z, 0), (AX, 0), (Z, 0)]),
+            (
+                "EXERCISES",
+                vec![
+                    (EH, 1),
+                    (K, 0),
+                    (S, 0),
+                    (ER, 0),
+                    (S, 0),
+                    (AY, 2),
+                    (Z, 0),
+                    (AX, 0),
+                    (Z, 0),
+                ],
+            ),
+            (
+                "RECOGNIZES",
+                vec![
+                    (R, 0),
+                    (EH, 1),
+                    (K, 0),
+                    (AX, 0),
+                    (G, 0),
+                    (N, 0),
+                    (AY, 2),
+                    (Z, 0),
+                    (AX, 0),
+                    (Z, 0),
+                ],
+            ),
         ] {
             assert_eq!(pronounce(word), expected, "{word}");
         }
-        for root in [
-            "AMAZE",
-            "AMUSE",
-            "ABUSE",
-            "ARISE",
-            "EXERCISE",
-            "RECOGNIZE",
-            "MOUSE",
-        ] {
+        for root in ["AMAZE", "AMUSE", "MOUSE"] {
             let mut expected = pronounce(root);
             expected.extend([(IH, 0), (Z, 0)]);
             assert_eq!(pronounce(&format!("{root}S")), expected, "{root} + S");

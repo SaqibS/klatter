@@ -179,6 +179,8 @@ BUS B AH1 S
 GAS G AE1 S
 CITY S IH1 T IY0
 HOUSES HH AW1 Z IH0 Z
+USES Y UW1 Z IH0 Z
+ABUSES AX0 B Y UW1 Z IH0 Z
 HANGED HH AE1 NG D
 BUY B AY1
 LAUGH L AE1 F
@@ -288,17 +290,7 @@ pub(crate) fn lookup_phones(word: &str) -> Option<&'static [(Ph, u8)]> {
             for line in ENTRIES.lines() {
                 let mut parts = line.split_whitespace();
                 let Some(word) = parts.next() else { continue };
-                let phones = parts
-                    .map(|p| {
-                        let (name, stress) = match p.strip_suffix(|c: char| c.is_ascii_digit()) {
-                            Some(stem) => (stem, p.as_bytes()[p.len() - 1] - b'0'),
-                            None => (p, 0),
-                        };
-                        let ph = Ph::parse(name)
-                            .unwrap_or_else(|| panic!("bad phoneme {name} in {word}"));
-                        (ph, stress)
-                    })
-                    .collect();
+                let phones = parts.map(|p| parse_phone(word, p)).collect();
                 assert!(
                     entries.insert(word, phones).is_none(),
                     "duplicate dictionary entry: {word}"
@@ -308,6 +300,38 @@ pub(crate) fn lookup_phones(word: &str) -> Option<&'static [(Ph, u8)]> {
         })
         .get(word)
         .map(Vec::as_slice)
+}
+
+fn parse_phone(word: &str, p: &str) -> (Ph, u8) {
+    let (name, stress) = match p.strip_suffix(|c: char| c.is_ascii_digit()) {
+        Some(stem) => (stem, p.as_bytes()[p.len() - 1] - b'0'),
+        None => (p, 0),
+    };
+    let ph = Ph::parse(name).unwrap_or_else(|| panic!("bad phoneme {name} in {word}"));
+    (ph, stress)
+}
+
+// Binary distributions must include data/cmudict/LICENSE.txt.
+const CMUDICT: &str = include_str!("../data/cmudict/cmudict.txt");
+
+pub(crate) fn cmudict_phones(word: &str) -> Option<Vec<(Ph, u8)>> {
+    static LINES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    let lines = LINES.get_or_init(|| CMUDICT.lines().collect());
+    let index = lines
+        .binary_search_by(|line| {
+            line.split_once(' ')
+                .expect("CMUdict entry needs phonemes")
+                .0
+                .cmp(word)
+        })
+        .ok()?;
+    Some(
+        lines[index]
+            .split_whitespace()
+            .skip(1)
+            .map(|p| parse_phone(word, p))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -329,5 +353,23 @@ mod tests {
         let hello = super::lookup("HELLO").unwrap();
         assert_eq!(hello[1], ("AX".to_string(), 0));
         assert_eq!(hello[3], ("OW".to_string(), 1));
+    }
+
+    #[test]
+    fn cmudict_is_sorted_unique_and_parses() {
+        let mut previous = "";
+        for line in super::CMUDICT.lines() {
+            let (word, _) = line.split_once(' ').expect("word and phonemes");
+            assert!(previous < word, "out-of-order or duplicate entry: {word}");
+            let phones = super::cmudict_phones(word).expect("dictionary entry");
+            assert!(!phones.is_empty(), "{word}");
+            assert!(
+                phones
+                    .iter()
+                    .all(|(ph, stress)| *stress <= 2 && (ph.is_vowel() || *stress == 0)),
+                "{word}"
+            );
+            previous = word;
+        }
     }
 }

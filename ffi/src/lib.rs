@@ -191,6 +191,223 @@ pub unsafe extern "C" fn klatter_free(speech: *mut KlatterSpeech) {
     }
 }
 
+pub struct KlatterPronunciations(engine::Pronunciations);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn klatter_pronunciations_create() -> *mut KlatterPronunciations {
+    catch_unwind(|| {
+        Box::into_raw(Box::new(KlatterPronunciations(
+            engine::Pronunciations::default(),
+        )))
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// # Safety
+/// `dictionary` must be a live, exclusively accessed handle; strings must be NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_pronunciations_set(
+    dictionary: *mut KlatterPronunciations,
+    word: *const c_char,
+    phones: *const c_char,
+) -> c_int {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let dictionary = dictionary.as_mut()?;
+        if word.is_null() || phones.is_null() {
+            return None;
+        }
+        let word = CStr::from_ptr(word).to_str().ok()?;
+        let phones = CStr::from_ptr(phones).to_str().ok()?;
+        dictionary.0.insert(word, phones).ok()
+    }));
+    if matches!(result, Ok(Some(()))) {
+        1
+    } else {
+        -1
+    }
+}
+
+/// # Safety
+/// `dictionary` must be null or a live, exclusively accessed handle, freed only once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_pronunciations_free(dictionary: *mut KlatterPronunciations) {
+    if !dictionary.is_null() {
+        drop(unsafe { Box::from_raw(dictionary) });
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KlatterWord {
+    pub input_item: usize,
+    pub byte_offset: usize,
+    pub byte_length: usize,
+    pub sample: usize,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct KlatterPullBlock {
+    pub sample_count: usize,
+    pub mark_ids: *const u32,
+    pub mark_samples: *const usize,
+    pub mark_count: usize,
+    pub words: *const KlatterWord,
+    pub word_count: usize,
+}
+
+pub struct KlatterUtterance {
+    stream: engine::Utterance,
+    mark_ids: Vec<u32>,
+    mark_samples: Vec<usize>,
+    words: Vec<KlatterWord>,
+}
+
+pub struct KlatterCancel(engine::CancelHandle);
+
+/// # Safety
+/// Input arrays follow [`klatter_speak`]. An optional dictionary must be live and
+/// not concurrently modified. Inputs and overrides are copied before returning.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_utterance_create(
+    texts: *const *const c_char,
+    marks: *const u32,
+    count: usize,
+    sample_rate: u32,
+    voice: *const KlatterVoice,
+    dictionary: *const KlatterPronunciations,
+) -> *mut KlatterUtterance {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        with_input(texts, marks, count, sample_rate, voice, |items, voice| {
+            let empty = engine::Pronunciations::default();
+            let pronunciations = dictionary.as_ref().map_or(&empty, |d| &d.0);
+            engine::Utterance::new(items, sample_rate, voice, pronunciations).map(|stream| {
+                Box::new(KlatterUtterance {
+                    stream,
+                    mark_ids: Vec::new(),
+                    mark_samples: Vec::new(),
+                    words: Vec::new(),
+                })
+            })
+        })
+    }));
+    match result {
+        Ok(Some(Ok(utterance))) => Box::into_raw(utterance),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `utterance` must be live and exclusively accessed; `output` must hold `capacity`
+/// samples (null is allowed only at capacity zero). `block` must be writable.
+/// Returned metadata is borrowed until the next read or utterance destruction.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_utterance_read(
+    utterance: *mut KlatterUtterance,
+    output: *mut i16,
+    capacity: usize,
+    block: *mut KlatterPullBlock,
+) -> c_int {
+    let Some(block) = (unsafe { block.as_mut() }) else {
+        return -1;
+    };
+    *block = KlatterPullBlock::default();
+    if utterance.is_null()
+        || capacity > isize::MAX as usize / std::mem::size_of::<i16>()
+        || (capacity > 0 && output.is_null())
+    {
+        return -1;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let utterance = &mut *utterance;
+        let output = if capacity == 0 {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(output, capacity)
+        };
+        let rendered = utterance.stream.render(output);
+        (utterance.mark_ids, utterance.mark_samples) = rendered.marks.into_iter().unzip();
+        utterance.words = rendered
+            .words
+            .into_iter()
+            .map(|word| KlatterWord {
+                input_item: word.item,
+                byte_offset: word.text_range.start,
+                byte_length: word.text_range.len(),
+                sample: word.sample,
+            })
+            .collect();
+        *block = KlatterPullBlock {
+            sample_count: rendered.samples,
+            mark_ids: utterance.mark_ids.as_ptr(),
+            mark_samples: utterance.mark_samples.as_ptr(),
+            mark_count: utterance.mark_ids.len(),
+            words: utterance.words.as_ptr(),
+            word_count: utterance.words.len(),
+        };
+        if utterance.stream.cancel_handle().is_cancelled() {
+            -2
+        } else if rendered.samples > 0
+            || block.mark_count > 0
+            || block.word_count > 0
+            || !utterance.stream.is_finished()
+        {
+            1
+        } else {
+            0
+        }
+    }));
+    match result {
+        Ok(status) => status,
+        Err(_) => {
+            unsafe { (*utterance).stream.cancel_handle().cancel() };
+            *block = KlatterPullBlock::default();
+            -1
+        }
+    }
+}
+
+/// # Safety
+/// `utterance` must be live and not concurrently read or destroyed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_utterance_cancel_handle(
+    utterance: *const KlatterUtterance,
+) -> *mut KlatterCancel {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        utterance.as_ref().map_or(std::ptr::null_mut(), |u| {
+            Box::into_raw(Box::new(KlatterCancel(u.stream.cancel_handle())))
+        })
+    }))
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// # Safety
+/// `cancel` must be null or a live cancel handle. May run on another thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_cancel(cancel: *const KlatterCancel) {
+    if let Some(cancel) = unsafe { cancel.as_ref() } {
+        cancel.0.cancel();
+    }
+}
+
+/// # Safety
+/// `cancel` must be null or live, not concurrently accessed, and freed only once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_cancel_free(cancel: *mut KlatterCancel) {
+    if !cancel.is_null() {
+        drop(unsafe { Box::from_raw(cancel) });
+    }
+}
+
+/// # Safety
+/// `utterance` must be null or live, exclusively accessed, and freed only once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_utterance_free(utterance: *mut KlatterUtterance) {
+    if !utterance.is_null() {
+        drop(unsafe { Box::from_raw(utterance) });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +422,125 @@ mod tests {
         };
         unsafe { klatter_default_voice(&mut v) };
         v
+    }
+
+    #[test]
+    fn pull_api_owns_inputs_snapshots_overrides_and_reports_exact_positions() {
+        unsafe {
+            let dictionary = klatter_pronunciations_create();
+            assert!(!dictionary.is_null());
+            assert_eq!(
+                klatter_pronunciations_set(dictionary, c"read".as_ptr(), c"R EH1 D".as_ptr()),
+                1
+            );
+            assert_eq!(
+                klatter_pronunciations_set(dictionary, c"read".as_ptr(), c"R AE".as_ptr()),
+                -1
+            );
+            let text = CString::new("Read $12.50.").unwrap();
+            let texts = [text.as_ptr(), std::ptr::null()];
+            let marks = [0, u32::MAX];
+            let stream = klatter_utterance_create(
+                texts.as_ptr(),
+                marks.as_ptr(),
+                2,
+                22050,
+                &default_voice(),
+                dictionary,
+            );
+            assert!(!stream.is_null());
+            drop(text);
+            klatter_pronunciations_free(dictionary);
+            let mut overrides = engine::Pronunciations::default();
+            overrides.insert("read", "R EH1 D").unwrap();
+            let expected = engine::speak_with_pronunciations(
+                &[Item::Text("Read $12.50."), Item::Mark(u32::MAX)],
+                22050,
+                &Voice::default(),
+                &overrides,
+            );
+            let mut pcm = Vec::new();
+            let mut found_marks = Vec::new();
+            let mut words = Vec::new();
+            loop {
+                let mut output = [123; 137];
+                let mut block = KlatterPullBlock::default();
+                let status =
+                    klatter_utterance_read(stream, output.as_mut_ptr(), output.len(), &mut block);
+                assert!(status >= 0);
+                pcm.extend_from_slice(&output[..block.sample_count]);
+                let ids = std::slice::from_raw_parts(block.mark_ids, block.mark_count);
+                let samples = std::slice::from_raw_parts(block.mark_samples, block.mark_count);
+                found_marks.extend(ids.iter().copied().zip(samples.iter().copied()));
+                words.extend_from_slice(std::slice::from_raw_parts(block.words, block.word_count));
+                if status == 0 {
+                    break;
+                }
+            }
+            assert_eq!(pcm, expected.samples);
+            assert_eq!(found_marks, expected.marks);
+            assert_eq!(words[0].byte_offset, 0);
+            assert_eq!(words[0].byte_length, 4);
+            assert!(
+                words
+                    .iter()
+                    .any(|w| w.byte_offset == 5 && w.byte_length == 6)
+            );
+            let cancel = klatter_utterance_cancel_handle(stream);
+            klatter_utterance_free(stream);
+            klatter_cancel(cancel);
+            klatter_cancel_free(cancel);
+        }
+    }
+
+    #[test]
+    fn pull_cancellation_and_invalid_inputs_have_distinct_statuses() {
+        unsafe {
+            let texts = [c"Hello.".as_ptr()];
+            assert!(
+                klatter_utterance_create(
+                    texts.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    16000,
+                    std::ptr::null(),
+                    std::ptr::null()
+                )
+                .is_null()
+            );
+            let stream = klatter_utterance_create(
+                texts.as_ptr(),
+                std::ptr::null(),
+                1,
+                16000,
+                &default_voice(),
+                std::ptr::null(),
+            );
+            let cancel = klatter_utterance_cancel_handle(stream);
+            let mut block = KlatterPullBlock::default();
+            assert_eq!(
+                klatter_utterance_read(stream, std::ptr::null_mut(), 10, &mut block),
+                -1
+            );
+            assert_eq!(
+                klatter_utterance_read(stream, std::ptr::null_mut(), 0, &mut block),
+                1
+            );
+            klatter_cancel(cancel);
+            let mut output = [123; 32];
+            assert_eq!(
+                klatter_utterance_read(stream, output.as_mut_ptr(), 32, &mut block),
+                -2
+            );
+            assert_eq!(output, [0; 32]);
+            assert_eq!(block.sample_count, 0);
+            assert_eq!(block.word_count, 0);
+            klatter_cancel_free(cancel);
+            klatter_utterance_free(stream);
+            klatter_utterance_free(std::ptr::null_mut());
+            klatter_cancel_free(std::ptr::null_mut());
+            klatter_pronunciations_free(std::ptr::null_mut());
+        }
     }
 
     #[test]

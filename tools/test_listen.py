@@ -61,6 +61,9 @@ class ListeningTests(unittest.TestCase):
                 manifest = listen.prepare("one two\n\nthree four", ["a", "b"], folder, 300, 17)
                 self.assertEqual(sorted(t["order"][0] for t in manifest["trials"]), [0, 1])
                 self.assertTrue(all((folder / t["file"]).is_file() for t in manifest["trials"]))
+                starts = {listen.prepare("one two", ["a", "b"], Path(parent) / f"seed-{seed}",
+                                         300, seed)["trials"][0]["order"][0] for seed in range(8)}
+                self.assertEqual(starts, {0, 1})
                 with self.assertRaises(FileExistsError):
                     listen.prepare("one two", ["a", "b"], folder, 300, 17)
 

@@ -178,9 +178,21 @@ pub fn build_with_pronunciations(
     tokens: &[Token],
     overrides: &lexicon::Pronunciations,
 ) -> (Vec<Seg>, Vec<(u32, usize)>) {
+    let plan = build_plan(tokens, overrides);
+    (plan.segs, plan.marks)
+}
+
+pub(crate) struct SegmentPlan {
+    pub segs: Vec<Seg>,
+    pub marks: Vec<(u32, usize)>,
+    pub words: Vec<(usize, usize)>,
+}
+
+pub(crate) fn build_plan(tokens: &[Token], overrides: &lexicon::Pronunciations) -> SegmentPlan {
     let mut segs = vec![Seg::pause(None)];
     let mut marks = Vec::new();
-    for token in tokens {
+    let mut words = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
         match token {
             Token::Mark(id) => {
                 let speech_started = segs.iter().any(|s| s.ph.is_some());
@@ -196,6 +208,7 @@ pub fn build_with_pronunciations(
                 if phones.is_empty() {
                     continue;
                 }
+                words.push((index, segs.len()));
                 let syl = syllabify(&phones);
                 let n_syl = phones.iter().filter(|p| p.0.is_vowel()).count().max(1);
                 let function_word = phones.iter().all(|p| p.1 == 0);
@@ -228,7 +241,7 @@ pub fn build_with_pronunciations(
         segs.push(Seg::pause(Some(Break::Period)));
     }
     mark_phrase_final(&mut segs);
-    (segs, marks)
+    SegmentPlan { segs, marks, words }
 }
 
 fn mark_phrase_final(segs: &mut [Seg]) {

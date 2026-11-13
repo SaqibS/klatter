@@ -196,7 +196,30 @@ fn push_break(out: &mut Vec<Token>, b: Break) {
 }
 
 fn is_word_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '\''
+    c.is_ascii_alphanumeric() || c == '\'' || is_combining_mark(c)
+}
+
+fn is_combining_mark(c: char) -> bool {
+    ('\u{0300}'..='\u{036f}').contains(&c)
+}
+
+fn fold_latin_letter(c: char) -> char {
+    let folded = match c {
+        '\u{00e0}'..='\u{00e5}' | '\u{00c0}'..='\u{00c5}' => 'a',
+        '\u{00e7}' | '\u{00c7}' => 'c',
+        '\u{00e8}'..='\u{00eb}' | '\u{00c8}'..='\u{00cb}' => 'e',
+        '\u{00ec}'..='\u{00ef}' | '\u{00cc}'..='\u{00cf}' => 'i',
+        '\u{00f1}' | '\u{00d1}' => 'n',
+        '\u{00f2}'..='\u{00f6}' | '\u{00d2}'..='\u{00d6}' | '\u{00f8}' | '\u{00d8}' => 'o',
+        '\u{00f9}'..='\u{00fc}' | '\u{00d9}'..='\u{00dc}' => 'u',
+        '\u{00fd}' | '\u{00ff}' | '\u{00dd}' | '\u{0178}' => 'y',
+        _ => return c,
+    };
+    if c.is_uppercase() {
+        folded.to_ascii_uppercase()
+    } else {
+        folded
+    }
 }
 
 fn expand_number(num: &str, suffix: &str, allow_year: bool, out: &mut Vec<Token>) {
@@ -238,6 +261,11 @@ fn expand_number(num: &str, suffix: &str, allow_year: bool, out: &mut Vec<Token>
 }
 
 fn expand_word(raw: &str, out: &mut Vec<Token>) {
+    if !raw.is_ascii() && raw.chars().any(is_combining_mark) {
+        let stripped: String = raw.chars().filter(|&c| !is_combining_mark(c)).collect();
+        expand_word(&stripped, out);
+        return;
+    }
     let word = raw.trim_matches('\'');
     if word.is_empty() {
         return;
@@ -351,7 +379,7 @@ pub fn append_with_spans(
         .chars()
         .map(|c| match c {
             '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{ff07}' => '\'',
-            _ => c,
+            _ => fold_latin_letter(c),
         })
         .collect();
     let mut i = 0;
@@ -532,6 +560,25 @@ pub fn end_utterance(tokens: &mut Vec<Token>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latin_accents_fold_without_losing_original_utf8_spans() {
+        let text = "Caf\u{e9} na\u{ef}ve jalape\u{f1}o cafe\u{301}";
+        let mut tokens = Vec::new();
+        let mut spans = Vec::new();
+        append_with_spans(text, &mut tokens, |_, range| spans.push(range));
+        assert_eq!(
+            tokens,
+            ["CAFE", "NAIVE", "JALAPENO", "CAFE"].map(|s| Token::Word(s.into()))
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .map(|range| &text[range.clone()])
+                .collect::<Vec<_>>(),
+            ["Caf\u{e9}", "na\u{ef}ve", "jalape\u{f1}o", "cafe\u{301}"]
+        );
+    }
 
     fn words(text: &str) -> String {
         show(normalize(text))

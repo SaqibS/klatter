@@ -151,6 +151,24 @@ The scripts in `tools\eloquence` measure how a Klatter rendering differs from a 
 
 When rendering with `segdump`'s optional scale and output arguments, the audio uses the same synthesis path and fixed gain as the CLI and screen-reader interface.
 
+## Pronunciation fallback
+
+Pronunciation fallback folds common accented Latin letters to English lookup
+keys, including combining accents, while word events retain original UTF-8
+ranges. After exact readings and existing inflections, additional suffixes can
+reuse known stems with silent-E, consonant-doubling or I/Y repairs. A compound
+requires two known components of at least four letters and one unambiguous
+split, without a function-word head; its second component receives secondary
+stress. Unknown stems and ambiguous compounds retain the
+whole-word rules. No generic prefix stripping or connected-speech weak-form
+changes are applied.
+
+A known IZE reading can supply an otherwise unknown ISE spelling. Stress-bearing
+EER is not treated as an ordinary ER derivation.
+
+Accent folding is not multilingual pronunciation or homograph disambiguation:
+for example, accented and unaccented forms can share an English lookup key.
+
 ## Known limitations
 
 - Pronunciation does not use sentence context to distinguish words such as present- and past-tense READ. Words absent from both dictionaries depend on morphology and letter-to-sound guesses.

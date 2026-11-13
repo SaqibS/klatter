@@ -65,7 +65,11 @@ impl Seg {
 }
 
 pub fn pronounce(word: &str) -> Vec<(Ph, u8)> {
-    let mut phones = word_pronunciation(word);
+    pronounce_with(word, &lexicon::Pronunciations::default())
+}
+
+pub fn pronounce_with(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(Ph, u8)> {
+    let mut phones = word_pronunciation(word, overrides);
     if FUNCTION_WORDS.contains(&word) {
         for (_, stress) in &mut phones {
             *stress = 0;
@@ -74,7 +78,10 @@ pub fn pronounce(word: &str) -> Vec<(Ph, u8)> {
     phones
 }
 
-fn word_pronunciation(word: &str) -> Vec<(Ph, u8)> {
+fn word_pronunciation(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(Ph, u8)> {
+    if let Some(entry) = overrides.get(word) {
+        return entry.to_vec();
+    }
     if let Some(entry) = lexicon::lookup_phones(word) {
         return entry.to_vec();
     }
@@ -86,7 +93,7 @@ fn word_pronunciation(word: &str) -> Vec<(Ph, u8)> {
         None => morph::split(word),
     };
     if let Some((root, suffix)) = split {
-        let mut phones = pronounce(&root);
+        let mut phones = pronounce_with(&root, overrides);
         if !phones.is_empty() {
             // Roots like DO and BE are unstressed function words, but doing and being are not.
             if suffix != Suffix::S
@@ -164,6 +171,13 @@ pub fn build(tokens: &[Token]) -> Vec<Seg> {
 /// Also returns each mark with the index of the segment that follows it; marks
 /// before any speech precede the leading pause.
 pub fn build_with_marks(tokens: &[Token]) -> (Vec<Seg>, Vec<(u32, usize)>) {
+    build_with_pronunciations(tokens, &lexicon::Pronunciations::default())
+}
+
+pub fn build_with_pronunciations(
+    tokens: &[Token],
+    overrides: &lexicon::Pronunciations,
+) -> (Vec<Seg>, Vec<(u32, usize)>) {
     let mut segs = vec![Seg::pause(None)];
     let mut marks = Vec::new();
     for token in tokens {
@@ -178,7 +192,7 @@ pub fn build_with_marks(tokens: &[Token]) -> (Vec<Seg>, Vec<(u32, usize)>) {
                 }
             }
             Token::Word(w) => {
-                let phones = pronounce(w);
+                let phones = pronounce_with(w, overrides);
                 if phones.is_empty() {
                     continue;
                 }

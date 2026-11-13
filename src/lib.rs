@@ -8,6 +8,8 @@
 // which reads more clearly than zipped iterators.
 #![allow(clippy::needless_range_loop)]
 
+#[cfg(test)]
+mod cmudict;
 pub mod klatt;
 pub mod lexicon;
 pub mod lts;
@@ -18,6 +20,8 @@ pub mod prosody;
 pub mod text;
 pub mod utterance;
 pub mod wav;
+
+pub use lexicon::{PronunciationError, Pronunciations};
 
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
@@ -79,15 +83,30 @@ pub fn synthesize(input: &str, sample_rate: u32) -> Vec<i16> {
 /// Speaks all items as one utterance, so text on either side of a mark keeps
 /// its phrasing.
 pub fn speak(items: &[Item], sample_rate: u32, voice: &Voice) -> Speech {
+    speak_with_pronunciations(items, sample_rate, voice, &Pronunciations::default())
+}
+
+pub fn speak_with_pronunciations(
+    items: &[Item],
+    sample_rate: u32,
+    voice: &Voice,
+    pronunciations: &Pronunciations,
+) -> Speech {
     let mut speech = Speech::default();
-    speak_stream(items, sample_rate, voice, |samples, marks| {
-        let start = speech.samples.len();
-        speech
-            .marks
-            .extend(marks.iter().map(|&(id, offset)| (id, start + offset)));
-        speech.samples.extend_from_slice(samples);
-        true
-    });
+    speak_stream_with_pronunciations(
+        items,
+        sample_rate,
+        voice,
+        pronunciations,
+        |samples, marks| {
+            let start = speech.samples.len();
+            speech
+                .marks
+                .extend(marks.iter().map(|&(id, offset)| (id, start + offset)));
+            speech.samples.extend_from_slice(samples);
+            true
+        },
+    );
     speech
 }
 
@@ -102,12 +121,28 @@ pub fn speak_stream(
     items: &[Item],
     sample_rate: u32,
     voice: &Voice,
+    output: impl FnMut(&[i16], &[(u32, usize)]) -> bool,
+) -> bool {
+    speak_stream_with_pronunciations(
+        items,
+        sample_rate,
+        voice,
+        &Pronunciations::default(),
+        output,
+    )
+}
+
+pub fn speak_stream_with_pronunciations(
+    items: &[Item],
+    sample_rate: u32,
+    voice: &Voice,
+    pronunciations: &Pronunciations,
     mut output: impl FnMut(&[i16], &[(u32, usize)]) -> bool,
 ) -> bool {
     if !output(&[], &[]) {
         return false;
     }
-    let (frames, frame_marks) = frames_with_marks(items, voice);
+    let (frames, frame_marks) = frames_with_pronunciations(items, voice, pronunciations);
     if !output(&[], &[]) {
         return false;
     }
@@ -138,6 +173,14 @@ pub fn speak_stream(
 }
 
 fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(u32, usize)>) {
+    frames_with_pronunciations(items, voice, &Pronunciations::default())
+}
+
+fn frames_with_pronunciations(
+    items: &[Item],
+    voice: &Voice,
+    pronunciations: &Pronunciations,
+) -> (Vec<klatt::Frame>, Vec<(u32, usize)>) {
     let mut tokens = Vec::new();
     for item in items {
         match *item {
@@ -146,7 +189,7 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
         }
     }
     text::end_utterance(&mut tokens);
-    let (mut segs, seg_marks) = utterance::build_with_marks(&tokens);
+    let (mut segs, seg_marks) = utterance::build_with_pronunciations(&tokens, pronunciations);
     if segs.iter().all(|s| s.ph.is_none()) {
         return (
             Vec::new(),
@@ -174,6 +217,36 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_overrides_are_isolated_and_leave_default_speech_unchanged() {
+        let items = [Item::Text("Read.")];
+        let default = speak(&items, 16000, &Voice::default());
+        let mut overrides = Pronunciations::default();
+        assert_eq!(
+            speak_with_pronunciations(&items, 16000, &Voice::default(), &overrides),
+            default
+        );
+        overrides.insert("read", "R EH1 D").unwrap();
+        assert_ne!(
+            speak_with_pronunciations(&items, 16000, &Voice::default(), &overrides),
+            default
+        );
+        assert_eq!(speak(&items, 16000, &Voice::default()), default);
+        overrides.insert("glorp", "G L AO1 R P").unwrap();
+        assert_eq!(
+            utterance::pronounce_with("GLORPING", &overrides),
+            vec![
+                (phoneme::Ph::G, 0),
+                (phoneme::Ph::L, 0),
+                (phoneme::Ph::AO, 1),
+                (phoneme::Ph::R, 0),
+                (phoneme::Ph::P, 0),
+                (phoneme::Ph::IH, 0),
+                (phoneme::Ph::NG, 0)
+            ]
+        );
+    }
 
     #[test]
     fn source_balance_retains_pcm_headroom_at_full_volume() {

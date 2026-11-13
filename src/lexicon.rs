@@ -6,6 +6,69 @@ use std::sync::OnceLock;
 
 use crate::phoneme::Ph;
 
+/// Caller-owned overrides; dictionary stress is still subject to connected-speech deaccenting.
+#[derive(Clone, Debug, Default)]
+pub struct Pronunciations {
+    entries: HashMap<String, Vec<(Ph, u8)>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PronunciationError(String);
+
+impl std::fmt::Display for PronunciationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PronunciationError {}
+
+impl Pronunciations {
+    /// Validates one normalized English word and ARPAbet phones before replacing an entry.
+    pub fn insert(&mut self, word: &str, pronunciation: &str) -> Result<(), PronunciationError> {
+        if word.is_empty()
+            || word.starts_with('\'')
+            || word.ends_with('\'')
+            || !word.bytes().all(|c| c.is_ascii_alphabetic() || c == b'\'')
+        {
+            return Err(PronunciationError("override needs one English word".into()));
+        }
+        let mut phones = Vec::new();
+        for token in pronunciation.split_whitespace() {
+            let (base, stress) = token
+                .strip_suffix(['0', '1', '2'])
+                .map_or((token, None), |base| {
+                    (base, Some(token.as_bytes()[token.len() - 1] - b'0'))
+                });
+            let ph = Ph::parse(base)
+                .ok_or_else(|| PronunciationError(format!("unknown phone: {token}")))?;
+            if ph.is_vowel() != stress.is_some() {
+                return Err(PronunciationError(format!(
+                    "only vowels require stress 0, 1 or 2: {token}"
+                )));
+            }
+            let stress = stress.unwrap_or(0);
+            phones.push((
+                if ph == Ph::AH && stress == 0 {
+                    Ph::AX
+                } else {
+                    ph
+                },
+                stress,
+            ));
+        }
+        if phones.is_empty() {
+            return Err(PronunciationError("override pronunciation is empty".into()));
+        }
+        self.entries.insert(word.to_ascii_uppercase(), phones);
+        Ok(())
+    }
+
+    pub(crate) fn get(&self, word: &str) -> Option<&[(Ph, u8)]> {
+        self.entries.get(word).map(Vec::as_slice)
+    }
+}
+
 // Some exact CMUdict matches are needed to disambiguate inflection roots.
 const ENTRIES: &str = "
 AN AX0 N
@@ -91,7 +154,7 @@ fn parse_phone(word: &str, p: &str) -> (Ph, u8) {
 }
 
 // Binary distributions must include data/cmudict/LICENSE.txt.
-const CMUDICT: &str = include_str!("../data/cmudict/cmudict.txt");
+const CMUDICT: &str = include_str!(concat!(env!("OUT_DIR"), "/cmudict.txt"));
 
 pub(crate) fn cmudict_phones(word: &str) -> Option<Vec<(Ph, u8)>> {
     static LINES: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -116,6 +179,28 @@ pub(crate) fn cmudict_phones(word: &str) -> Option<Vec<(Ph, u8)>> {
 #[cfg(test)]
 mod tests {
     use crate::phoneme::Ph;
+
+    #[test]
+    fn invalid_overrides_do_not_replace_valid_entries() {
+        let mut dictionary = super::Pronunciations::default();
+        dictionary.insert("read", "R EH1 D").unwrap();
+        for (word, phones) in [
+            ("", "R"),
+            ("two words", "R"),
+            ("'read", "R"),
+            ("read", ""),
+            ("read", "R AE"),
+            ("read", "R1 EH1 D"),
+            ("read", "R AE3 D"),
+            ("read", "R UNKNOWN1 D"),
+        ] {
+            assert!(dictionary.insert(word, phones).is_err(), "{word}: {phones}");
+        }
+        assert_eq!(
+            dictionary.get("READ"),
+            Some([(Ph::R, 0), (Ph::EH, 1), (Ph::D, 0)].as_slice())
+        );
+    }
 
     #[test]
     fn every_entry_uses_known_phonemes() {

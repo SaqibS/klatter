@@ -55,6 +55,25 @@ Relevant sources for further general rules:
 
 The `ffi` crate builds `klatter.dll` with the C functions declared in `ffi/klatter.h`. `klatter_speak` takes parallel arrays of UTF-8 strings and mark ids (a null string means "mark here") plus a `KlatterVoice`, and returns 16-bit samples and mark positions that the caller releases with `klatter_free`. It returns null for invalid input and never unwinds a panic into the caller.
 
+The additive pull API creates a `KlatterUtterance`, then fills host-owned buffers
+with `klatter_utterance_read`. It copies text and snapshots an optional
+`KlatterPronunciations` dictionary. Word events contain the original input-item
+index, UTF-8 byte range, and absolute sample position; number and acronym
+expansions can share a source range. Manual marks remain independent. Metadata
+is borrowed until the next read/free. Rust hosts use `Utterance::new` and `render`.
+
+Obtain a separate cancel handle before starting reads. It may be cancelled from
+another thread and outlive its utterance; it never affects a different utterance.
+The host remains responsible for flushing already queued playback audio. Pull
+reads return 1 for output/events, 0 for EOF, -2 for cancellation, and -1 for invalid
+input/failure. An empty output buffer does not advance the utterance.
+
+Pull rendering preserves whole-utterance acoustic planning and exact PCM,
+independently of buffer size. Cancellation is checked per emitted sample and around planning,
+but cannot interrupt an acoustic plan in progress. Source text and overrides
+are copied upfront; creating an utterance does no acoustic planning until its
+first nonempty read.
+
 ### NVDA add-on
 
 `nvda/addon` holds an NVDA synthesizer driver that loads `klatter.dll` with ctypes. It supports rate, pitch, inflection and volume, index marks and mid-utterance pitch changes; NVDA's 0-100 settings map onto `KlatterVoice`, with 50 giving Klatter's natural voice and each 50 steps doubling or halving the rate or pitch. NVDA is a 64-bit x86 program, so the add-on carries an x64 DLL, which runs under emulation on ARM64 Windows.

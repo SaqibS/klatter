@@ -333,6 +333,20 @@ pub fn normalize_fragment(text: &str) -> Vec<Token> {
 
 /// Appends a word-boundary fragment using the preceding text's punctuation context.
 pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
+    append_with_spans(text, out, |_, _| {});
+}
+
+/// Reports original UTF-8 ranges for normalized words, including shared ranges for expansions.
+pub fn append_with_spans(
+    text: &str,
+    out: &mut Vec<Token>,
+    mut word: impl FnMut(usize, std::ops::Range<usize>),
+) {
+    let positions: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([text.len()])
+        .collect();
     let chars: Vec<char> = text
         .chars()
         .map(|c| match c {
@@ -342,6 +356,21 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
         .collect();
     let mut i = 0;
     while i < chars.len() {
+        let start = i;
+        let first = out.len();
+        normalize_step(&chars, &mut i, out);
+        for (index, token) in out.iter().enumerate().skip(first) {
+            if matches!(token, Token::Word(_)) {
+                word(index, positions[start]..positions[i]);
+            }
+        }
+    }
+}
+
+fn normalize_step(chars: &[char], position: &mut usize, out: &mut Vec<Token>) {
+    let mut i = *position;
+    // Each branch advances one source token, so expansions share its original range.
+    (|| {
         let c = chars[i];
         let sign = c == '\u{2212}'
             || (c == '-' && (i == 0 || (!is_word_char(chars[i - 1]) && chars[i - 1] != '-')));
@@ -351,7 +380,7 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
         {
             push_words(out, ["minus".to_string()]);
             i += 1;
-            continue;
+            return;
         }
         let negative = sign && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit());
         if c.is_ascii_digit() || negative {
@@ -362,8 +391,7 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
             // Gather numbers with thousands separators and decimals.
             let start = i;
             let mut j = i;
-            while j < chars.len()
-                && (chars[j].is_ascii_digit() || is_thousands_separator(&chars, j))
+            while j < chars.len() && (chars[j].is_ascii_digit() || is_thousands_separator(chars, j))
             {
                 j += 1;
             }
@@ -386,13 +414,13 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
                 words.extend(digit_words(&frac));
                 push_words(out, words);
                 i = k;
-                continue;
+                return;
             }
             if j < chars.len() && chars[j] == '%' {
                 expand_number(&int_part, "", false, out);
                 push_words(out, ["percent".to_string()]);
                 i = j + 1;
-                continue;
+                return;
             }
             let mut k = j;
             while k < chars.len() && chars[k].is_ascii_alphabetic() {
@@ -401,7 +429,7 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
             let suffix: String = chars[j..k].iter().collect();
             expand_number(&int_part, &suffix, allow_year, out);
             i = k;
-            continue;
+            return;
         }
         if c == '$' {
             let negative = matches!(chars.get(i + 1), Some('-' | '\u{2212}'))
@@ -446,7 +474,7 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
                 push_words(out, ["dollars".to_string()]);
                 i += 1;
             }
-            continue;
+            return;
         }
         if c.is_ascii_alphabetic() {
             let start = i;
@@ -460,7 +488,7 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
                 i += 1;
             }
             expand_word(&word, out);
-            continue;
+            return;
         }
         match c {
             '.' => {
@@ -485,7 +513,8 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
             _ => {}
         }
         i += 1;
-    }
+    })();
+    *position = i;
 }
 
 /// Ends the last clause as a statement, ahead of any trailing marks.

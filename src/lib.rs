@@ -17,11 +17,13 @@ pub mod morph;
 pub mod params;
 pub mod phoneme;
 pub mod prosody;
+pub mod stream;
 pub mod text;
 pub mod utterance;
 pub mod wav;
 
 pub use lexicon::{PronunciationError, Pronunciations};
+pub use stream::{CancelHandle, Rendered, Utterance, WordEvent};
 
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
@@ -189,12 +191,32 @@ fn frames_with_pronunciations(
         }
     }
     text::end_utterance(&mut tokens);
-    let (mut segs, seg_marks) = utterance::build_with_pronunciations(&tokens, pronunciations);
+    let plan = plan_tokens(&tokens, voice, pronunciations);
+    (plan.frames, plan.marks)
+}
+
+struct AcousticPlan {
+    frames: Vec<klatt::Frame>,
+    marks: Vec<(u32, usize)>,
+    words: Vec<(usize, usize)>,
+}
+
+fn plan_tokens(
+    tokens: &[text::Token],
+    voice: &Voice,
+    pronunciations: &Pronunciations,
+) -> AcousticPlan {
+    let utterance::SegmentPlan {
+        mut segs,
+        marks,
+        words,
+    } = utterance::build_plan(tokens, pronunciations);
     if segs.iter().all(|s| s.ph.is_none()) {
-        return (
-            Vec::new(),
-            seg_marks.into_iter().map(|(id, _)| (id, 0)).collect(),
-        );
+        return AcousticPlan {
+            frames: Vec::new(),
+            marks: marks.into_iter().map(|(id, _)| (id, 0)).collect(),
+            words: Vec::new(),
+        };
     }
     prosody::assign_durations(&mut segs);
     let scale = DEFAULT_WPM / voice.wpm;
@@ -207,11 +229,19 @@ fn frames_with_pronunciations(
         let shaped = f.f0 * voice.inflection + prosody::BASE_F0 * (1.0 - voice.inflection);
         f.f0 = (shaped * pitch_scale).max(MIN_F0);
     }
-    let marks = seg_marks
+    let marks = marks
         .into_iter()
         .map(|(id, seg)| (id, starts.get(seg).copied().unwrap_or(frames.len())))
         .collect();
-    (frames, marks)
+    let words = words
+        .into_iter()
+        .map(|(token, seg)| (token, starts[seg]))
+        .collect();
+    AcousticPlan {
+        frames,
+        marks,
+        words,
+    }
 }
 
 #[cfg(test)]

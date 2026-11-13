@@ -141,7 +141,8 @@ def prepare(text, specs, folder, wpm, seed):
     prompt = folder / "prompt.wav"
     engines[0].render([(QUESTION, str(prompt))], engines[0].native)
     question, question_rate = load(prompt)
-    orders = [i % 2 for i in range(len(paragraphs))]
+    start = rng.randrange(2)
+    orders = [(i + start) % 2 for i in range(len(paragraphs))]
     rng.shuffle(orders)
     trials = []
     for index, (passage, reverse) in enumerate(zip(paragraphs, orders), 1):

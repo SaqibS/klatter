@@ -1,6 +1,9 @@
 """Converts CMUdict into the sorted pronunciation table Klatter embeds.
 
-Usage: python tools/cmudict.py cmudict.dict data/cmudict/cmudict.txt
+Usage: python tools/cmudict.py data/cmudict/cmudict.dict output.txt
+
+This inspection utility follows Cargo's conversion policy. Cargo generates its
+own table from the authoritative raw source; output.txt is not checked in.
 
 Keeps each word's first pronunciation and words spelled only with letters and
 apostrophes, uppercases them, and writes unstressed AH as Klatter's schwa AX.

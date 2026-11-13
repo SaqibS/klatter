@@ -26,11 +26,23 @@ The rate is in words per minute, as with `say -r` (`--rate=300` also works); the
 
 The output is a 16 kHz, 16-bit mono WAV file at a fixed gain, so short and long utterances keep their natural relative loudness. Repeated calls to `klatt::Synth::render` on the same synthesizer preserve both synthesis state and fractional-sample timing, so rendering frames in chunks produces the same samples as rendering them together. The project uses no third-party crates.
 
-CMUdict is bundled with the engine. Redistributions must include `data/cmudict/LICENSE.txt`; the NVDA builder includes it automatically.
+Raw CMUdict is bundled with the engine as the authoritative source. Cargo
+validates it and generates the sorted embedded lookup table without requiring
+Python or network access. The pinned source identity is in
+`data/cmudict/README.txt`. Redistributions must include `data/cmudict/LICENSE.txt`;
+the NVDA builder includes it automatically.
 
 ### Library
 
 `klatter::synthesize(text, sample_rate)` returns samples at any sample rate. For hosts such as screen readers, `klatter::speak(items, sample_rate, voice)` takes a `Voice` and a list of `Item`s: text interleaved with numbered marks. It speaks the items as one utterance, so a mark does not break the phrasing, and returns the samples together with the sample index each mark falls on. `Voice` is in physical units: words per minute, a pitch baseline in Hz (93 by default; the whole contour moves with it), an inflection multiplier that stretches the contour around that baseline (0 is monotone), and a linear volume. Hosts map their own scales onto these.
+
+For caller-specific readings, construct a `Pronunciations`, insert entries such
+as `insert("read", "R EH1 D")`, and pass it to `speak_with_pronunciations` or
+`speak_stream_with_pronunciations`. Entries override built-in readings and
+CMUdict, and can supply roots for unknown inflections. Vowels require stress
+digits 0, 1 or 2; consonants must not have digits. Invalid entries return an
+error without replacing an existing entry. Overrides are caller-owned, not
+global; normal connected-speech deaccenting still applies.
 
 Relevant sources for further general rules:
 

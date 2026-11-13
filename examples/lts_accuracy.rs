@@ -21,7 +21,7 @@ fn main() {
     let mut exact = 0usize;
     let mut errors = 0usize;
     let mut total = 0usize;
-    for line in include_str!("../data/cmudict/cmudict.txt").lines() {
+    for line in include_str!(concat!(env!("OUT_DIR"), "/cmudict.txt")).lines() {
         let mut parts = line.split_whitespace();
         let word = parts.next().expect("dictionary word");
         let reference: Vec<Ph> = parts

@@ -1,5 +1,5 @@
 //! Prosody: Klatt's (1979) segmental duration rules, as summarized in Klatt
-//! (1987), and a hat-pattern F0 contour with declination and accent peaks.
+//! (1987), with rate-normalized accent peaks and declination.
 
 use crate::phoneme::{Class, Ph, Place};
 use crate::text::Break;
@@ -8,13 +8,14 @@ use crate::utterance::Seg;
 pub fn pause_ms(brk: Option<Break>, utterance_edge: bool) -> f64 {
     match brk {
         _ if utterance_edge => 150.0,
-        // Eloquence's reference reading barely pauses; boundaries are carried
-        // mainly by pitch and final lengthening.
-        Some(Break::Comma) => 60.0,
-        Some(_) => 130.0,
+        Some(Break::Comma) => 165.0,
+        Some(_) => 385.0,
         None => 150.0,
     }
 }
+
+/// Phrase boundaries stay distinct without dominating fast speech.
+const PAUSE_RATE_EXPONENT: f64 = 1.5;
 
 fn neighbor(segs: &[Seg], i: usize, offset: isize) -> Option<Ph> {
     let j = i as isize + offset;
@@ -111,9 +112,8 @@ const FRICATIVE_FACTOR: f64 = 0.95;
 const AFFRICATE_FACTOR: f64 = 1.2;
 
 /// Klatt's value is 1.4, but final vowels already escape non-final shortening
-/// and get the full postvocalic effect, so 1.4 drawls them; Eloquence marks
-/// boundaries with only mild lengthening.
-const PHRASE_FINAL_LENGTHENING: f64 = 1.0;
+/// and get the full postvocalic effect, so they need trimming to avoid a drawl.
+const PHRASE_FINAL_LENGTHENING: f64 = 0.8;
 
 pub fn assign_durations(segs: &mut [Seg]) {
     let last = segs.len().saturating_sub(1);
@@ -241,24 +241,40 @@ pub fn assign_durations(segs: &mut [Seg]) {
     }
 }
 
-/// Scales segment and onset budgets together, preserving the voiced portion.
+/// Speech and onset budgets scale together; pauses compress more at fast rates.
 pub fn scale_durations(segs: &mut [Seg], scale: f64) {
     for seg in segs {
-        seg.dur_ms *= scale;
+        seg.dur_ms *= if seg.ph.is_none() {
+            scale.powf(PAUSE_RATE_EXPONENT)
+        } else {
+            scale
+        };
         seg.aspiration_ms *= scale;
     }
 }
 
-const TOP_F0: f64 = 120.0;
-pub const BASE_F0: f64 = 93.0;
-const FLOOR_F0: f64 = 78.0;
-const HAT_RISE: f64 = 12.0;
-const ACCENT: f64 = 10.0;
-const DECLINATION_PER_SEC: f64 = 10.0;
+const START_F0: f64 = 110.0;
+pub const BASE_F0: f64 = 100.0;
+const FLOOR_F0: f64 = 74.0;
+const FIRST_ACCENT: f64 = 18.0;
+const ACCENT: f64 = 12.0;
+const DECLINATION_PER_SEC: f64 = 8.0;
+const ACCENT_RISE_MS: f64 = 200.0;
+const ACCENT_FALL_MS: f64 = 150.0;
 
 /// Builds an F0 track (Hz per frame) given each segment's first frame and
 /// frame count.
 pub fn f0_contour(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f64) -> Vec<f64> {
+    f0_contour_with_time_scale(segs, starts, lens, frame_ms, 1.0)
+}
+
+pub(crate) fn f0_contour_with_time_scale(
+    segs: &[Seg],
+    starts: &[usize],
+    lens: &[usize],
+    frame_ms: f64,
+    time_scale: f64,
+) -> Vec<f64> {
     let total: usize = lens.iter().sum();
     let mut f0 = vec![BASE_F0; total];
     let mut i = 0;
@@ -288,7 +304,7 @@ pub fn f0_contour(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f64)
             &lens[clause_begin..i],
             ending,
             sentence_start,
-            frame_ms,
+            frame_ms / time_scale,
             &mut f0,
         );
         // Silent-frame pitch must not flatten the clause's boundary tone.
@@ -330,7 +346,7 @@ fn clause_contour(
     lens: &[usize],
     ending: Break,
     sentence_start: usize,
-    frame_ms: f64,
+    natural_frame_ms: f64,
     f0: &mut [f64],
 ) {
     let begin = starts[0];
@@ -339,35 +355,34 @@ fn clause_contour(
         .filter(|&k| segs[k].is_vowel() && segs[k].stress == 1 && !segs[k].function_word)
         .collect();
     let baseline = |frame: usize| {
-        let secs = (frame - sentence_start) as f64 * frame_ms / 1000.0;
-        (TOP_F0 - DECLINATION_PER_SEC * secs).max(BASE_F0)
+        let secs = (frame - sentence_start) as f64 * natural_frame_ms / 1000.0;
+        (START_F0 - DECLINATION_PER_SEC * secs).max(BASE_F0)
     };
-    let hat_on = accents.first().map(|&k| starts[k]).unwrap_or(end);
     // Hertz, Younes & Zinovieva (1999) put the accent's high target about 75% of
-    // the way through the nucleus, rising from the middle of the onset.
+    // the way through the nucleus.
     let peak_of = |k: usize| {
         let e = nucleus_end(segs, k);
         starts[k] + (starts[e - 1] + lens[e - 1] - starts[k]) * 3 / 4
     };
-    let last_accent = accents.last().copied();
-    let hat_off = last_accent.map(peak_of).unwrap_or(end);
-    let rise = (100.0 / frame_ms) as usize;
+    let rise = ACCENT_RISE_MS / natural_frame_ms;
+    let fall = ACCENT_FALL_MS / natural_frame_ms;
+    let ease = |x: f64| 0.5 - 0.5 * (std::f64::consts::PI * x.clamp(0.0, 1.0)).cos();
     for frame in begin..end {
-        let mut v = baseline(frame);
-        if frame >= hat_on && frame < hat_off {
-            v += HAT_RISE * ((frame - hat_on) as f64 / rise as f64).min(1.0);
-        }
-        f0[frame] = v;
-    }
-    for &k in &accents {
-        let peak = peak_of(k);
-        let half = lens[k].max(8);
-        for frame in peak.saturating_sub(half)..(peak + half).min(end) {
-            let w = 1.0 - (frame as f64 - peak as f64).abs() / half as f64;
-            f0[frame] += ACCENT * w.max(0.0);
-        }
+        // Taking the maximum prevents adjacent accents from forming a plateau.
+        let bump = accents.iter().enumerate().fold(0.0f64, |m, (n, &k)| {
+            let peak = peak_of(k) as f64;
+            let t = frame as f64;
+            let shape = if t <= peak {
+                ease((t - (peak - rise)) / rise)
+            } else {
+                ease(1.0 - (t - peak) / fall)
+            };
+            m.max(if n == 0 { FIRST_ACCENT } else { ACCENT } * shape)
+        });
+        f0[frame] = baseline(frame) + bump;
     }
     // Boundary tones also apply to clauses with no pitch accents.
+    let last_accent = accents.last().copied();
     let tail_start = last_accent.map(peak_of).unwrap_or_else(|| {
         segs.iter()
             .rposition(Seg::is_vowel)
@@ -384,11 +399,11 @@ fn clause_contour(
         f0[frame] = match ending {
             Break::Period | Break::Exclamation => top + (FLOOR_F0 - top) * t.sqrt(),
             Break::Comma => {
-                let dip = baseline(frame) - 5.0;
+                let dip = baseline(frame) - 10.0;
                 if t < 0.6 {
                     top + (dip - top) * (t / 0.6)
                 } else {
-                    dip + 12.0 * (t - 0.6) / 0.4
+                    dip + 8.0 * (t - 0.6) / 0.4
                 }
             }
             Break::Question => {
@@ -440,14 +455,14 @@ mod tests {
     }
 
     #[test]
-    fn phrase_final_vowel_is_longer() {
+    fn phrase_final_vowel_is_not_shortened() {
         let d = durations("cat cat");
         let vowels: Vec<f64> = d
             .iter()
             .filter(|(p, _)| p.is_vowel())
             .map(|x| x.1)
             .collect();
-        assert!(vowels[1] > vowels[0] * 1.05, "{vowels:?}");
+        assert!(vowels[1] >= vowels[0], "{vowels:?}");
     }
 
     #[test]
@@ -530,12 +545,71 @@ mod tests {
     }
 
     #[test]
-    fn phrase_breaks_are_shorter_than_utterance_padding() {
+    fn sentence_breaks_are_longer_than_commas() {
         let comma = pause_ms(Some(Break::Comma), false);
-        let padding = pause_ms(None, true);
         for ending in [Break::Period, Break::Question, Break::Exclamation] {
             let sentence = pause_ms(Some(ending), false);
-            assert!(0.0 < comma && comma < sentence && sentence < padding);
+            assert!(0.0 < comma && comma < sentence);
+        }
+    }
+
+    #[test]
+    fn speeding_up_preserves_speech_rhythm_but_compresses_pauses_more() {
+        let mut segs = build(&normalize("The quick brown fox. See the lazy dog."));
+        assign_durations(&mut segs);
+        for scale in [0.5, 1.0 / 3.0, 2.0] {
+            let mut scaled = segs.clone();
+            scale_durations(&mut scaled, scale);
+            for (natural, scaled) in segs.iter().zip(scaled) {
+                if natural.ph.is_none() {
+                    if scale < 1.0 {
+                        assert!(scaled.dur_ms < natural.dur_ms * scale);
+                    } else {
+                        assert!(scaled.dur_ms > natural.dur_ms * scale);
+                    }
+                } else {
+                    assert_eq!(scaled.dur_ms, natural.dur_ms * scale);
+                    assert_eq!(scaled.aspiration_ms, natural.aspiration_ms * scale);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accents_return_to_baseline_and_keep_their_shape_at_faster_rates() {
+        let mut segs = build(&normalize("bee a bee a bee"));
+        segs.retain(|s| s.ph.is_some());
+        let lens = vec![40; segs.len()];
+        let starts: Vec<usize> = (0..segs.len()).map(|i| i * 40).collect();
+        let mut natural = vec![0.0; lens.iter().sum()];
+        clause_contour(&segs, &starts, &lens, Break::Period, 0, 5.0, &mut natural);
+        let accents: Vec<usize> = (0..segs.len())
+            .filter(|&i| segs[i].is_vowel() && segs[i].stress == 1 && !segs[i].function_word)
+            .collect();
+        assert_eq!(accents.len(), 3);
+        let peaks: Vec<usize> = accents
+            .iter()
+            .map(|&i| starts[i] + lens[i] * 3 / 4)
+            .collect();
+        let between = (peaks[0] + peaks[1]) / 2;
+        let baseline = (START_F0 - DECLINATION_PER_SEC * between as f64 * 0.005).max(BASE_F0);
+        assert!((natural[between] - baseline).abs() < 0.01);
+        assert!(natural[peaks[0]] > natural[between] + 10.0);
+        let fast_starts: Vec<usize> = starts.iter().map(|s| s / 2).collect();
+        let fast_lens: Vec<usize> = lens.iter().map(|s| s / 2).collect();
+        let mut fast = vec![0.0; fast_lens.iter().sum()];
+        clause_contour(
+            &segs,
+            &fast_starts,
+            &fast_lens,
+            Break::Period,
+            0,
+            10.0,
+            &mut fast,
+        );
+        // Boundary tones inherit the preceding sample; compare the accent portion.
+        for (i, &f0) in fast.iter().take(peaks[2] / 2).enumerate() {
+            assert!((f0 - natural[2 * i]).abs() < 1e-9, "frame {i}");
         }
     }
 

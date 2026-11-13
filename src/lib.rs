@@ -21,8 +21,8 @@ pub mod wav;
 
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
-/// Output gain that puts the loudest speech in two long readings at 89% of full scale.
-const GAIN: f64 = 200_000.0;
+/// Leaves PCM headroom for the voicing-presence and consonant-noise boosts.
+const GAIN: f64 = 156_000.0;
 /// Keeps extreme pitch and inflection settings above the range where pulses become clicks.
 const MIN_F0: f64 = 30.0;
 
@@ -157,7 +157,7 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
     let scale = DEFAULT_WPM / voice.wpm;
     prosody::scale_durations(&mut segs, scale);
     let (starts, lens) = params::frame_layout(&segs);
-    let mut frames = params::build_frames_with_breathiness_scale(&segs, &starts, &lens, scale);
+    let mut frames = params::build_frames_with_time_scale(&segs, &starts, &lens, scale);
     let pitch_scale = voice.pitch_hz / prosody::BASE_F0;
     for f in &mut frames {
         // Written so the natural settings leave F0 bit-for-bit unchanged.
@@ -174,6 +174,28 @@ fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_balance_retains_pcm_headroom_at_full_volume() {
+        let text = "Tea, tree, try, quick, key, stay, dee, bee, beer. Cat cat. Or Australia? And she tried.";
+        for sample_rate in [16000, 16001] {
+            let speech = speak(
+                &[Item::Text(text)],
+                sample_rate,
+                &Voice {
+                    wpm: 110.0,
+                    ..Voice::default()
+                },
+            );
+            assert!(
+                !speech
+                    .samples
+                    .iter()
+                    .any(|&s| s == i16::MIN || s == i16::MAX),
+                "{sample_rate} Hz clips at full volume"
+            );
+        }
+    }
 
     #[test]
     fn produces_audible_speech_of_plausible_length() {
@@ -378,7 +400,12 @@ mod tests {
         )
         .samples
         .len();
-        assert!((at(2) as f64 - first as f64).abs() < 0.2 * DEFAULT_SAMPLE_RATE as f64);
+        let pause_gap =
+            prosody::pause_ms(Some(text::Break::Period), false) - prosody::pause_ms(None, true);
+        assert!(
+            (at(2) as f64 - first as f64).abs()
+                < (0.1 + pause_gap / 1000.0) * DEFAULT_SAMPLE_RATE as f64
+        );
     }
 
     #[test]

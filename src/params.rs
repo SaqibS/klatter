@@ -8,6 +8,8 @@ use crate::utterance::Seg;
 
 const ASPIRATION_DB: f64 = 55.0;
 const VOICE_BAR_DB: f64 = 47.0;
+/// Keeps short frication and release cues prominent relative to vowels.
+const CONSONANT_NOISE_BOOST_DB: f64 = 6.0;
 /// Eloquence's /h/ is mostly voiced, with noise on top, rather than pure noise.
 const HH_AV_DB: f64 = 52.0;
 const HH_AH_DB: f64 = 55.0;
@@ -272,6 +274,14 @@ fn release_frames(ph: Ph) -> usize {
     if ph.place() == Place::Velar { 3 } else { 2 }
 }
 
+fn noise_level(af: f64) -> f64 {
+    if af > 0.0 {
+        af + CONSONANT_NOISE_BOOST_DB
+    } else {
+        0.0
+    }
+}
+
 fn aspiration_frames(segs: &[Seg], i: usize, next_len: usize) -> usize {
     ms(segs[i + 1].aspiration_ms).min(next_len.saturating_sub(1))
 }
@@ -341,20 +351,20 @@ pub fn build_frames(segs: &[Seg]) -> Vec<Frame> {
 
 /// Builds frames using the layout returned by [`frame_layout`] for these segments.
 pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Frame> {
-    build_frames_with_breathiness_scale(segs, starts, lens, 1.0)
+    build_frames_with_time_scale(segs, starts, lens, 1.0)
 }
 
-/// Fixed-length breathiness ramps would cover entire vowels at fast rates.
-pub(crate) fn build_frames_with_breathiness_scale(
+/// Pitch accents and breathiness ramps must follow the speaking-rate scale.
+pub(crate) fn build_frames_with_time_scale(
     segs: &[Seg],
     starts: &[usize],
     lens: &[usize],
-    breathiness_scale: f64,
+    time_scale: f64,
 ) -> Vec<Frame> {
     assert_eq!(segs.len(), starts.len());
     assert_eq!(segs.len(), lens.len());
     let formants = formant_tracks(segs, starts, lens);
-    let f0 = prosody::f0_contour(segs, starts, lens, FRAME_MS);
+    let f0 = prosody::f0_contour_with_time_scale(segs, starts, lens, FRAME_MS, time_scale);
     let mut frames: Vec<Frame> = (0..formants.len())
         .map(|k| Frame {
             f0: f0[k],
@@ -381,7 +391,7 @@ pub(crate) fn build_frames_with_breathiness_scale(
             Class::Fricative => {
                 for fr in &mut frames[range] {
                     fr.av = spec.av;
-                    fr.af = spec.af;
+                    fr.af = noise_level(spec.af);
                     fr.ab = spec.ab;
                     fr.a = spec.a;
                 }
@@ -406,7 +416,7 @@ pub(crate) fn build_frames_with_breathiness_scale(
                         fr.avs = VOICE_BAR_DB;
                     } else {
                         fr.av = spec.av;
-                        fr.af = spec.af;
+                        fr.af = noise_level(spec.af);
                         fr.ab = spec.ab;
                         fr.a = spec.a;
                         if ph.class() == Class::Stop && ph.is_voiced() {
@@ -436,7 +446,7 @@ pub(crate) fn build_frames_with_breathiness_scale(
         if !segs[i].ph.is_some_and(Ph::is_sonorant) {
             continue;
         }
-        let b = breathiness(segs, i, lens[i], breathiness_scale);
+        let b = breathiness(segs, i, lens[i], time_scale);
         for (fr, b) in frames[starts[i]..starts[i] + lens[i]].iter_mut().zip(b) {
             if fr.av > 0.0 {
                 apply_voice_quality(fr, b.0, b.1);
@@ -592,6 +602,36 @@ mod tests {
     }
 
     #[test]
+    fn consonant_noise_boost_preserves_stop_closure_and_release_spectra() {
+        for (text, ph) in [("at", Ph::T), ("pitch", Ph::CH)] {
+            let (segs, starts, lens, frames) = frames_for(text);
+            let i = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
+            let phone = &frames[starts[i]..starts[i] + lens[i]];
+            let release = phone.iter().position(|fr| fr.af > 0.0).unwrap();
+            assert!(release > 0, "{text}");
+            assert!(phone[..release].iter().all(|fr| fr.af == 0.0));
+            let spec = ph.spec();
+            assert!(
+                phone[release..]
+                    .iter()
+                    .all(|fr| { fr.af == spec.af + 6.0 && fr.ab == spec.ab && fr.a == spec.a }),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_fricative_noise_is_stronger_without_changing_voicing() {
+        let (segs, starts, lens, frames) = frames_for("zoo");
+        let i = segs.iter().position(|s| s.ph == Some(Ph::Z)).unwrap();
+        let fr = frames[starts[i] + lens[i] / 2];
+        let spec = Ph::Z.spec();
+        assert_eq!(fr.af, spec.af + 6.0);
+        assert_eq!(fr.av, spec.av);
+        assert_eq!((fr.ab, fr.a), (spec.ab, spec.a));
+    }
+
+    #[test]
     fn pauses_do_not_start_voicing_or_retune_the_ringing_tract() {
         for text in ["Or Australia? And she tried.", "man. see."] {
             for scale in [1.0, 0.5, 1.0 / 3.0] {
@@ -599,7 +639,7 @@ mod tests {
                 assign_durations(&mut segs);
                 prosody::scale_durations(&mut segs, scale);
                 let (starts, lens) = frame_layout(&segs);
-                let frames = build_frames_with_breathiness_scale(&segs, &starts, &lens, scale);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
                 for i in 0..segs.len() {
                     if segs[i].ph.is_some() {
                         continue;
@@ -677,7 +717,7 @@ mod tests {
                 let budgets: Vec<f64> = segs.iter().map(|s| s.aspiration_ms).collect();
                 prosody::scale_durations(&mut segs, scale);
                 let (starts, lens) = frame_layout(&segs);
-                let frames = build_frames_with_breathiness_scale(&segs, &starts, &lens, scale);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
                 for i in 1..segs.len() {
                     assert_eq!(segs[i].aspiration_ms, budgets[i] * scale);
                     if budgets[i] == 0.0 {

@@ -56,9 +56,8 @@ const CASCADE_GAIN: f64 = 1.0;
 const GLOTTAL_PEAK: f64 = 0.75;
 const REFERENCE_PERIOD_S: f64 = 0.01;
 const PARALLEL_GAIN: f64 = 0.035;
-/// Makes aspiration at AH = AV as strong as the high-frequency harmonics of
-/// default voicing, as in Fig. 11(d) of the 1990 paper.
-const ASPIRATION_GAIN: f64 = 0.012;
+/// Balances aspiration with the stronger voicing and consonant-noise cues.
+const ASPIRATION_GAIN: f64 = 0.0192;
 const VOICE_BAR_GAIN: f64 = 1.0;
 
 /// Parameters for one 5 ms frame. Amplitudes are in dB; 0 means silent.
@@ -202,6 +201,58 @@ fn db_to_lin(db: f64) -> f64 {
         10f64.powf((db - 60.0) / 20.0)
     }
 }
+
+#[derive(Clone, Copy, Default, Debug)]
+struct Peaking {
+    b: [f64; 3],
+    a: [f64; 2],
+    x: [f64; 2],
+    y: [f64; 2],
+}
+
+impl Peaking {
+    /// Octave bandwidth compensates for bilinear warping across sample rates.
+    fn new(f: f64, octaves: f64, gain_db: f64, sr: f64) -> Self {
+        let amp = 10f64.powf(gain_db / 40.0);
+        let w = 2.0 * PI * f / sr;
+        let alpha = w.sin() * (2f64.ln() / 2.0 * octaves * w / w.sin()).sinh();
+        let a0 = 1.0 + alpha / amp;
+        Peaking {
+            b: [
+                (1.0 + alpha * amp) / a0,
+                -2.0 * w.cos() / a0,
+                (1.0 - alpha * amp) / a0,
+            ],
+            a: [-2.0 * w.cos() / a0, (1.0 - alpha / amp) / a0],
+            ..Peaking::default()
+        }
+    }
+
+    fn tick(&mut self, x: f64) -> f64 {
+        let y = self.b[0] * x + self.b[1] * self.x[0] + self.b[2] * self.x[1]
+            - self.a[0] * self.y[0]
+            - self.a[1] * self.y[1];
+        self.x = [x, self.x[0]];
+        self.y = [y, self.y[0]];
+        y
+    }
+
+    #[cfg(test)]
+    fn gain_at(&self, f: f64, sr: f64) -> f64 {
+        let w = 2.0 * PI * f / sr;
+        let z = |c: [f64; 3]| {
+            let re = c[0] + c[1] * w.cos() + c[2] * (2.0 * w).cos();
+            let im = -(c[1] * w.sin() + c[2] * (2.0 * w).sin());
+            (re * re + im * im).sqrt()
+        };
+        z(self.b) / z([1.0, self.a[0], self.a[1]])
+    }
+}
+
+/// Only voicing needs presence; aspiration and frication have their own shaping.
+const PRESENCE_HZ: f64 = 2200.0;
+const PRESENCE_OCTAVES: f64 = 1.7;
+const PRESENCE_DB: f64 = 5.0;
 
 /// Bandwidth of the 0 Hz low-pass resonator that attenuates by `tl` dB at
 /// 3 kHz; the paper defines TL by that attenuation.
@@ -430,6 +481,7 @@ pub struct Synth {
     parallel: [Resonator; 5],
     parallel_norm: [f64; 5],
     voice_rad: Radiation,
+    presence: Peaking,
     bar_rad: Radiation,
     noise_rad: Radiation,
     last_frame: Option<Frame>,
@@ -460,6 +512,7 @@ impl Synth {
             parallel: [Resonator::default(); 5],
             parallel_norm: [0.0; 5],
             voice_rad: Radiation::default(),
+            presence: Peaking::new(PRESENCE_HZ, PRESENCE_OCTAVES, PRESENCE_DB, sr),
             bar_rad: Radiation::default(),
             noise_rad: Radiation::default(),
             last_frame: None,
@@ -540,7 +593,9 @@ impl Synth {
     /// bar, noise, glottis open).
     fn excite(&mut self, fr: &Frame, av: f64, avs: f64, voiced: bool) -> (f64, f64, bool) {
         let (flow, open, started) = self.source.tick(fr, av, self.sr);
-        let voice = self.tilt.tick(self.voice_rad.tick(flow));
+        let voice = self
+            .presence
+            .tick(self.tilt.tick(self.voice_rad.tick(flow)));
         let impulse = started.unwrap_or(0.0);
         let voice_bar = self
             .bar_rad
@@ -724,6 +779,41 @@ mod tests {
             r.set(0.0, tilt_bandwidth(tl, sr), sr);
             let db = 20.0 * r.gain_at(3000.0, sr).log10();
             assert!((db + tl).abs() < 0.01, "TL {tl}: {db} dB");
+        }
+    }
+
+    #[test]
+    fn presence_boosts_midrange_without_boosting_spectral_extremes() {
+        for sr in [8000.0, 16000.0, 16001.0, 22050.0, 44100.0, 48000.0] {
+            let p = Peaking::new(PRESENCE_HZ, PRESENCE_OCTAVES, PRESENCE_DB, sr);
+            let db = |f: f64| 20.0 * p.gain_at(f, sr).log10();
+            assert!((db(2200.0) - 5.0).abs() < 0.01, "{sr}");
+            assert!(db(50.0).abs() < 0.1 && db(0.49 * sr).abs() < 0.5, "{sr}");
+        }
+    }
+
+    #[test]
+    fn presence_does_not_change_noise_or_voice_bar() {
+        for source in [
+            Frame {
+                ah: 55.0,
+                ..Frame::default()
+            },
+            Frame {
+                af: 60.0,
+                ab: 60.0,
+                ..Frame::default()
+            },
+            Frame {
+                avs: 47.0,
+                ..Frame::default()
+            },
+        ] {
+            let mut synth = Synth::new(16000);
+            let boosted = synth.render(&[source; 40]);
+            let mut control = Synth::new(16000);
+            control.presence = Peaking::new(PRESENCE_HZ, PRESENCE_OCTAVES, 0.0, 16000.0);
+            assert_eq!(boosted, control.render(&[source; 40]));
         }
     }
 

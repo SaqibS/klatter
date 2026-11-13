@@ -73,6 +73,33 @@ Regression tests cover consonant-cluster shortening, terminal intonation in unac
 
 Rate-specific checks cover the relative timing of breathy offsets and preservation of a less breathy vowel core at faster rates. Pause tests check that voicing does not leak into pauses and that ringing tract settings are retained. Source tests cover abrupt formant-change transients and check that open-glottis modulation follows the decimation filter's delay, keeping noise modulation and open-phase formant changes aligned with the glottal flow at different pitches and sample rates.
 
+## Listening and pronunciation diagnostics
+
+```
+python tools\listen.py passage.txt baseline.exe candidate.exe --out work\listening --wpm 300
+cargo run --release --example phones < passage.txt
+cargo run --release --example lts_accuracy
+```
+
+The listening tool measures actual rate, matches active-speech RMS with shared
+clipping headroom, and presents one blind pair per paragraph. Its question is
+spoken in the audio. Order is balanced across trials, replay uses the same WAV,
+and `manifest.json` records the seed, text, engine settings, executable hashes,
+levels, actual rates and votes. Keep the manifest hidden until voting.
+`--render-only` prepares clips without playback; an existing output directory
+is never overwritten. Calibration trims edge silence but retains internal pauses.
+
+The default two-executable comparison needs only Python's standard library.
+The adapters also support installed SAPI voices, Eloquence (`ECI_DLL` selects an
+installed DLL), and eSpeak (`espeakng-loader` required). Comparing different
+sample rates requires SciPy; clips are resampled to the highest native rate.
+External engines and recognizer models are not bundled or downloaded.
+
+`phones` reports intended pronunciations after normalization. `lts_accuracy`
+measures raw letter-to-sound agreement against first CMUdict readings, without
+morphology or stress scoring. This is a diagnostic, not a listening-quality
+score or an estimate of real unknown-word accuracy.
+
 ## Voice metrics
 
 ```

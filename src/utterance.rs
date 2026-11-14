@@ -8,7 +8,7 @@ use crate::phoneme::Ph;
 use crate::text::{Break, Token};
 
 // Citation-form stress should not give every function word its own accent.
-const FUNCTION_WORDS: &[&str] = &[
+pub(crate) const FUNCTION_WORDS: &[&str] = &[
     "A", "AM", "AN", "AND", "ARE", "AS", "AT", "BE", "BEEN", "BUT", "BY", "CAN", "COULD", "DID",
     "DO", "DOES", "EACH", "FOR", "FROM", "HAD", "HAS", "HAVE", "HE", "HER", "HIM", "HIS", "HOW",
     "I", "I'D", "I'LL", "I'M", "I'VE", "IF", "IN", "INTO", "IS", "IT", "IT'S", "ITS", "MAY", "ME",
@@ -79,13 +79,7 @@ pub fn pronounce_with(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(P
 }
 
 fn word_pronunciation(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(Ph, u8)> {
-    if let Some(entry) = overrides.get(word) {
-        return entry.to_vec();
-    }
-    if let Some(entry) = lexicon::lookup_phones(word) {
-        return entry.to_vec();
-    }
-    if let Some(entry) = lexicon::cmudict_phones(word) {
+    if let Some(entry) = lexicon::known_phones(word, overrides) {
         return entry;
     }
     let split = match word.strip_suffix("'S").filter(|b| !b.is_empty()) {
@@ -105,6 +99,9 @@ fn word_pronunciation(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(P
             phones.extend(morph::suffix_phones(phones.last().map(|p| p.0), suffix));
             return phones;
         }
+    }
+    if let Some(phones) = lexicon::derive_known(word, overrides) {
+        return phones;
     }
     let letters: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect();
     let phones = lts::letters_to_phonemes(word);
@@ -290,6 +287,37 @@ fn mark_phrase_final(segs: &mut [Seg]) {
 mod tests {
     use super::*;
     use crate::text::normalize;
+
+    #[test]
+    fn new_derivations_feed_inflections_without_overriding_whole_words() {
+        use Ph::*;
+        assert_eq!(
+            pronounce("BOOKDOCTORS"),
+            vec![
+                (B, 0),
+                (UH, 1),
+                (K, 0),
+                (D, 0),
+                (AA, 2),
+                (K, 0),
+                (T, 0),
+                (ER, 0),
+                (Z, 0)
+            ]
+        );
+        assert_eq!(
+            pronounce("MOONLESS"),
+            vec![(M, 0), (UW, 1), (N, 0), (L, 0), (AX, 0), (S, 0)]
+        );
+        assert_eq!(
+            pronounce("KINDNESS"),
+            lexicon::cmudict_phones("KINDNESS").unwrap()
+        );
+        assert_eq!(
+            pronounce("XYZZYFUL"),
+            lts::assign_stress("XYZZYFUL", &lts::letters_to_phonemes("XYZZYFUL"))
+        );
+    }
 
     #[test]
     fn cmudict_supplies_irregular_words_through_normalization() {

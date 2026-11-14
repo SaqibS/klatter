@@ -146,6 +146,32 @@ python tools\voice_metrics.py reference.wav candidate.wav
 
 Compares a rendering against a reference recording of the same text using metrics that do not depend on speaking rate: F0 distribution, H1-H2, median F1-F3, pause frequency and length, and long-term spectrum bands relative to 250-500 Hz. Each difference is expressed in tolerances, and the score is their root mean square (0 means a match). Worst mismatches are listed first. Requires Python with numpy, and 16-bit WAV at 16 kHz or above.
 
+## Pronunciation fallback
+
+Unknown mixed-case identifiers split at lower-to-upper and acronym-to-word
+boundaries (`getElementByID`, `XMLParser`). Existing whole-word dictionary
+readings and caller overrides take precedence. Each part uses the ordinary
+word, acronym and number rules; expansions retain the complete identifier's
+original UTF-8 range. Lowercase words, ordinary title case, all-caps words and
+apostrophe-containing words keep their existing behavior. This is pronunciation
+fallback, not screen-reader punctuation verbosity or symbol announcement.
+
+Pronunciation fallback folds common accented Latin letters to English lookup
+keys, including combining accents, while word events retain original UTF-8
+ranges. After exact readings and existing inflections, additional suffixes can
+reuse known stems with silent-E, consonant-doubling or I/Y repairs. A compound
+requires two known components of at least four letters and one unambiguous
+split, without a function-word head; its second component receives secondary
+stress. Unknown stems and ambiguous compounds retain the
+whole-word rules. No generic prefix stripping or connected-speech weak-form
+changes are applied.
+
+A known IZE reading can supply an otherwise unknown ISE spelling. Stress-bearing
+EER is not treated as an ordinary ER derivation.
+
+Accent folding is not multilingual pronunciation or homograph disambiguation:
+for example, accented and unaccented forms can share an English lookup key.
+
 ## Known limitations
 
 - Pronunciation does not use sentence context to distinguish words such as present- and past-tense READ. Words absent from both dictionaries depend on morphology and letter-to-sound guesses.

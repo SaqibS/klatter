@@ -151,6 +151,18 @@ class DriverTest(unittest.TestCase):
         self.synth.rate = 100
         self.assertAlmostEqual(self.synth._voice(50).wpm, 2 * d.wpm)
 
+    def test_mixed_case_identifiers_preserve_playback_indexes(self):
+        self.synth.speak([
+            IndexCommand(1), "getXMLValue2", IndexCommand(2), "NoteBook", IndexCommand(3),
+        ])
+        self.wait()
+        expected, _ = klatter.speak_items(
+            self.synth._dll, ["get XML Value 2", "notebook"], self.synth._voice(50),
+        )
+        self.assertEqual(bytes(self.synth._player.fed), expected)
+        self.assertEqual([e for e in events if e[0] == "index"],
+                         [("index", 1), ("index", 2), ("index", 3)])
+
     def test_pitch_command_changes_pitch_for_the_following_text(self):
         self.synth.speak(["cap", PitchCommand(80), "A", PitchCommand(50), IndexCommand(9)])
         self.wait()

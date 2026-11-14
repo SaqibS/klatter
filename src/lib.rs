@@ -186,7 +186,13 @@ fn frames_with_pronunciations(
     let mut tokens = Vec::new();
     for item in items {
         match *item {
-            Item::Text(t) => text::append_normalized(t, &mut tokens),
+            Item::Text(t) => assert!(text::append_with_spans_cancellable(
+                t,
+                &mut tokens,
+                |_, _| {},
+                pronunciations,
+                &|| false,
+            )),
             Item::Mark(id) => tokens.push(text::Token::Mark(id)),
         }
     }
@@ -315,6 +321,35 @@ mod tests {
                 (phoneme::Ph::NG, 0)
             ]
         );
+    }
+
+    #[test]
+    fn whole_identifier_overrides_precede_case_splitting_in_owned_and_pull_speech() {
+        let items = [Item::Mark(1), Item::Text("getXMLValue"), Item::Mark(2)];
+        let voice = Voice::default();
+        let mut overrides = Pronunciations::default();
+        overrides.insert("getXMLValue", "V AE1 L Y UW0").unwrap();
+        let expected = speak_with_pronunciations(&items, 16000, &voice, &overrides);
+        let equivalent = speak(
+            &[Item::Mark(1), Item::Text("value"), Item::Mark(2)],
+            16000,
+            &voice,
+        );
+        assert_eq!(expected, equivalent);
+        assert_ne!(expected.samples, speak(&items, 16000, &voice).samples);
+        let mut stream = Utterance::new(&items, 16000, &voice, &overrides).unwrap();
+        let mut actual = Speech::default();
+        let mut words = Vec::new();
+        while !stream.is_finished() {
+            let mut buffer = [0; 137];
+            let block = stream.render(&mut buffer);
+            actual.samples.extend_from_slice(&buffer[..block.samples]);
+            actual.marks.extend(block.marks);
+            words.extend(block.words);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text_range, 0..11);
     }
 
     #[test]

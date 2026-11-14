@@ -176,9 +176,157 @@ pub(crate) fn cmudict_phones(word: &str) -> Option<Vec<(Ph, u8)>> {
     )
 }
 
+pub(crate) fn known_phones(word: &str, overrides: &Pronunciations) -> Option<Vec<(Ph, u8)>> {
+    overrides
+        .get(word)
+        .or_else(|| lookup_phones(word))
+        .map(<[(Ph, u8)]>::to_vec)
+        .or_else(|| cmudict_phones(word))
+}
+
+pub(crate) fn derive_known(word: &str, overrides: &Pronunciations) -> Option<Vec<(Ph, u8)>> {
+    use Ph::*;
+    if !word.bytes().all(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    if let Some(stem) = word.strip_suffix("ISE")
+        && let Some(phones) = known_phones(&format!("{stem}IZE"), overrides)
+    {
+        return Some(phones);
+    }
+    const SUFFIXES: &[(&str, &[(Ph, u8)])] = &[
+        ("NESS", &[(N, 0), (AX, 0), (S, 0)]),
+        ("LESS", &[(L, 0), (AX, 0), (S, 0)]),
+        ("FUL", &[(F, 0), (AX, 0), (L, 0)]),
+        ("MENTS", &[(M, 0), (AX, 0), (N, 0), (T, 0), (S, 0)]),
+        ("MENT", &[(M, 0), (AX, 0), (N, 0), (T, 0)]),
+        ("ABLE", &[(AX, 0), (B, 0), (AX, 0), (L, 0)]),
+        ("ISH", &[(IH, 0), (SH, 0)]),
+        ("ISM", &[(IH, 0), (Z, 0), (AX, 0), (M, 0)]),
+        ("EST", &[(AX, 0), (S, 0), (T, 0)]),
+        ("ER", &[(ER, 0)]),
+    ];
+    for (suffix, ending) in SUFFIXES {
+        // EER carries its own stress, unlike the agent/comparative ER suffix.
+        if *suffix == "ER" && word.ends_with("EER") {
+            continue;
+        }
+        if let Some(stem) = word.strip_suffix(suffix).filter(|s| s.len() >= 2)
+            && let Some(mut phones) = known_stem(stem, overrides)
+        {
+            phones.extend_from_slice(ending);
+            return Some(phones);
+        }
+    }
+    // Product names and identifiers must not trigger a quadratic split search.
+    if word.len() > 64 {
+        return None;
+    }
+    let mut compound = None;
+    for split in 4..word.len().saturating_sub(3) {
+        let (left, right) = word.split_at(split);
+        if crate::utterance::FUNCTION_WORDS.contains(&left) {
+            continue;
+        }
+        if let (Some(mut first), Some(second)) = (
+            known_phones(left, overrides),
+            known_phones(right, overrides),
+        ) && first
+            .iter()
+            .any(|&(ph, stress)| ph.is_vowel() && stress == 1)
+            && second.iter().any(|&(ph, _)| ph.is_vowel())
+        {
+            // Ambiguous segmentations are weaker evidence than the whole-word rules.
+            if compound.is_some() {
+                return None;
+            }
+            first.extend(
+                second
+                    .into_iter()
+                    .map(|(ph, stress)| (ph, if stress == 1 { 2 } else { stress })),
+            );
+            compound = Some(first);
+        }
+    }
+    compound
+}
+
+fn known_stem(stem: &str, overrides: &Pronunciations) -> Option<Vec<(Ph, u8)>> {
+    known_phones(stem, overrides)
+        .or_else(|| known_phones(&format!("{stem}E"), overrides))
+        .or_else(|| {
+            let bytes = stem.as_bytes();
+            (bytes.len() >= 2
+                && bytes[bytes.len() - 1] == bytes[bytes.len() - 2]
+                && !b"AEIOUY".contains(&bytes[bytes.len() - 1]))
+            .then(|| known_phones(&stem[..stem.len() - 1], overrides))
+            .flatten()
+        })
+        .or_else(|| {
+            stem.strip_suffix('I')
+                .and_then(|s| known_phones(&format!("{s}Y"), overrides))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::phoneme::Ph;
+
+    #[test]
+    fn new_derivations_require_known_stems_and_unambiguous_compounds() {
+        let mut overrides = super::Pronunciations::default();
+        overrides.insert("glorp", "G L AO1 R P").unwrap();
+        assert_eq!(
+            super::derive_known("GLORPFUL", &overrides).unwrap(),
+            vec![
+                (Ph::G, 0),
+                (Ph::L, 0),
+                (Ph::AO, 1),
+                (Ph::R, 0),
+                (Ph::P, 0),
+                (Ph::F, 0),
+                (Ph::AX, 0),
+                (Ph::L, 0)
+            ]
+        );
+        assert!(super::derive_known("XYZZYFUL", &overrides).is_none());
+        assert_eq!(
+            super::derive_known("BOOKDOCTOR", &overrides).unwrap(),
+            vec![
+                (Ph::B, 0),
+                (Ph::UH, 1),
+                (Ph::K, 0),
+                (Ph::D, 0),
+                (Ph::AA, 2),
+                (Ph::K, 0),
+                (Ph::T, 0),
+                (Ph::ER, 0)
+            ]
+        );
+        for word in ["ZORA", "ZORAVAKA", "VAKATILO", "TILO"] {
+            overrides.insert(word, "B AE1 T").unwrap();
+        }
+        assert!(super::derive_known("ZORAVAKATILO", &overrides).is_none());
+        for word in ["COOKIN", "LOOKIN", "SHOOTIN", "STANDIN", "SOMETHIN"] {
+            assert!(super::derive_known(word, &overrides).is_none(), "{word}");
+        }
+        assert!(super::derive_known("GAZETTEER", &overrides).is_none());
+        assert_eq!(
+            super::derive_known("THEORISE", &overrides).unwrap(),
+            vec![
+                (Ph::TH, 0),
+                (Ph::IY, 1),
+                (Ph::ER, 0),
+                (Ph::AY, 2),
+                (Ph::Z, 0)
+            ]
+        );
+        overrides.insert("bookdoctor", "B UH1 K").unwrap();
+        assert_eq!(
+            crate::utterance::pronounce_with("BOOKDOCTOR", &overrides),
+            vec![(Ph::B, 0), (Ph::UH, 1), (Ph::K, 0)]
+        );
+    }
 
     #[test]
     fn invalid_overrides_do_not_replace_valid_entries() {

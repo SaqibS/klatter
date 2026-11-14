@@ -167,7 +167,8 @@ pub fn assign_durations(segs: &mut [Seg]) {
             } else {
                 0.7
             };
-            if vowel && !s.function_word {
+            // Phrase-final syllables are already lengthened, so they need no extra audibility.
+            if vowel && !s.function_word && !s.phrase_final {
                 prcnt *= UNSTRESSED_CONTENT_VOWEL_FACTOR;
             }
         }
@@ -488,6 +489,17 @@ mod tests {
         segs.iter()
             .filter_map(|s| s.ph.map(|p| (p, s.dur_ms)))
             .collect()
+    }
+
+    #[test]
+    fn phrase_final_unstressed_syllable_is_not_lengthened_twice() {
+        let d = durations("roses");
+        let vowels: Vec<f64> = d
+            .iter()
+            .filter(|(p, _)| p.is_vowel())
+            .map(|x| x.1)
+            .collect();
+        assert!(vowels[1] < vowels[0], "{vowels:?}");
     }
 
     #[test]

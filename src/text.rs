@@ -222,7 +222,13 @@ fn fold_latin_letter(c: char) -> char {
     }
 }
 
-fn expand_number(num: &str, suffix: &str, allow_year: bool, out: &mut Vec<Token>) {
+fn expand_number(
+    num: &str,
+    suffix: &str,
+    allow_year: bool,
+    out: &mut Vec<Token>,
+    pronunciations: &crate::Pronunciations,
+) {
     let suffix_lower = suffix.to_ascii_lowercase();
     let value: Option<u64> = num.parse().ok();
     match (value, suffix_lower.as_str()) {
@@ -248,22 +254,22 @@ fn expand_number(num: &str, suffix: &str, allow_year: bool, out: &mut Vec<Token>
             };
             push_words(out, words);
             if !suffix.is_empty() {
-                expand_word(suffix, out);
+                expand_word(suffix, out, pronunciations);
             }
         }
         (None, _) => {
             push_words(out, digit_words(num));
             if !suffix.is_empty() {
-                expand_word(suffix, out);
+                expand_word(suffix, out, pronunciations);
             }
         }
     }
 }
 
-fn expand_word(raw: &str, out: &mut Vec<Token>) {
+fn expand_word(raw: &str, out: &mut Vec<Token>, pronunciations: &crate::Pronunciations) {
     if !raw.is_ascii() && raw.chars().any(is_combining_mark) {
         let stripped: String = raw.chars().filter(|&c| !is_combining_mark(c)).collect();
-        expand_word(&stripped, out);
+        expand_word(&stripped, out, pronunciations);
         return;
     }
     let word = raw.trim_matches('\'');
@@ -277,7 +283,7 @@ fn expand_word(raw: &str, out: &mut Vec<Token>) {
         .unwrap_or(word.len());
     if digits_end > 0 {
         let (num, suffix) = word.split_at(digits_end);
-        expand_number(num, suffix, true, out);
+        expand_number(num, suffix, true, out, pronunciations);
         return;
     }
 
@@ -286,6 +292,23 @@ fn expand_word(raw: &str, out: &mut Vec<Token>) {
         return;
     }
 
+    let boundaries = case_boundaries(word);
+    if !boundaries.is_empty() {
+        let upper = word.to_ascii_uppercase();
+        // Case conventions are weaker evidence than an explicit whole-word reading.
+        if pronunciations.get(&upper).is_some() {
+            out.push(Token::Word(upper));
+            return;
+        }
+        if crate::lexicon::known_phones(&upper, pronunciations).is_none() {
+            let mut start = 0;
+            for end in boundaries.into_iter().chain([word.len()]) {
+                expand_word(&word[start..end], out, pronunciations);
+                start = end;
+            }
+            return;
+        }
+    }
     let has_vowel = lower.chars().any(|c| "aeiouy".contains(c));
     let letters_only = word.chars().all(|c| c.is_ascii_alphabetic());
     let all_caps = word.len() > 1 && word.chars().all(|c| c.is_ascii_uppercase());
@@ -301,16 +324,31 @@ fn expand_word(raw: &str, out: &mut Vec<Token>) {
         let mut run_is_digit = false;
         for c in word.chars() {
             if !run.is_empty() && c.is_ascii_digit() != run_is_digit {
-                expand_word(&run, out);
+                expand_word(&run, out, pronunciations);
                 run.clear();
             }
             run_is_digit = c.is_ascii_digit();
             run.push(c);
         }
-        expand_word(&run, out);
+        expand_word(&run, out, pronunciations);
         return;
     }
     out.push(Token::Word(word.to_ascii_uppercase()));
+}
+
+fn case_boundaries(word: &str) -> Vec<usize> {
+    let letters = word.as_bytes();
+    if !letters.iter().all(u8::is_ascii_alphabetic) {
+        return Vec::new();
+    }
+    (1..letters.len())
+        .filter(|&i| {
+            letters[i].is_ascii_uppercase()
+                && (letters[i - 1].is_ascii_lowercase()
+                    || (letters[i - 1].is_ascii_uppercase()
+                        && letters.get(i + 1).is_some_and(u8::is_ascii_lowercase)))
+        })
+        .collect()
 }
 
 fn is_pronounceable_acronym(lower: &str) -> bool {
@@ -370,13 +408,20 @@ pub fn append_with_spans(
     out: &mut Vec<Token>,
     word: impl FnMut(usize, std::ops::Range<usize>),
 ) {
-    assert!(append_with_spans_cancellable(text, out, word, &|| false));
+    assert!(append_with_spans_cancellable(
+        text,
+        out,
+        word,
+        &crate::Pronunciations::default(),
+        &|| false,
+    ));
 }
 
 pub(crate) fn append_with_spans_cancellable(
     text: &str,
     out: &mut Vec<Token>,
     mut word: impl FnMut(usize, std::ops::Range<usize>),
+    pronunciations: &crate::Pronunciations,
     cancelled: &impl Fn() -> bool,
 ) -> bool {
     let mut positions = Vec::new();
@@ -399,7 +444,7 @@ pub(crate) fn append_with_spans_cancellable(
         }
         let start = i;
         let first = out.len();
-        normalize_step(&chars, &mut i, out);
+        normalize_step(&chars, &mut i, out, pronunciations);
         for (index, token) in out.iter().enumerate().skip(first) {
             if matches!(token, Token::Word(_)) {
                 word(index, positions[start]..positions[i]);
@@ -409,7 +454,12 @@ pub(crate) fn append_with_spans_cancellable(
     !cancelled()
 }
 
-fn normalize_step(chars: &[char], position: &mut usize, out: &mut Vec<Token>) {
+fn normalize_step(
+    chars: &[char],
+    position: &mut usize,
+    out: &mut Vec<Token>,
+    pronunciations: &crate::Pronunciations,
+) {
     let mut i = *position;
     // Each branch advances one source token, so expansions share its original range.
     (|| {
@@ -459,7 +509,7 @@ fn normalize_step(chars: &[char], position: &mut usize, out: &mut Vec<Token>) {
                 return;
             }
             if j < chars.len() && chars[j] == '%' {
-                expand_number(&int_part, "", false, out);
+                expand_number(&int_part, "", false, out, pronunciations);
                 push_words(out, ["percent".to_string()]);
                 i = j + 1;
                 return;
@@ -469,7 +519,7 @@ fn normalize_step(chars: &[char], position: &mut usize, out: &mut Vec<Token>) {
                 k += 1;
             }
             let suffix: String = chars[j..k].iter().collect();
-            expand_number(&int_part, &suffix, allow_year, out);
+            expand_number(&int_part, &suffix, allow_year, out, pronunciations);
             i = k;
             return;
         }
@@ -529,7 +579,7 @@ fn normalize_step(chars: &[char], position: &mut usize, out: &mut Vec<Token>) {
             if is_abbrev && i < chars.len() && chars[i] == '.' {
                 i += 1;
             }
-            expand_word(&word, out);
+            expand_word(&word, out, pronunciations);
             return;
         }
         match c {
@@ -583,6 +633,7 @@ mod tests {
             "First second third",
             &mut tokens,
             |_, _| cancelled.set(true),
+            &crate::Pronunciations::default(),
             &|| cancelled.get(),
         ));
         assert_eq!(tokens, [Token::Word("FIRST".into())]);
@@ -604,6 +655,67 @@ mod tests {
                 .map(|range| &text[range.clone()])
                 .collect::<Vec<_>>(),
             ["Caf\u{e9}", "na\u{ef}ve", "jalape\u{f1}o", "cafe\u{301}"]
+        );
+    }
+
+    #[test]
+    fn mixed_case_identifiers_split_words_and_acronym_runs() {
+        for (identifier, expanded) in [
+            ("getElementByID", "get Element By ID"),
+            ("XMLParser", "XML Parser"),
+            ("HTTPServer", "HTTP Server"),
+            ("OpenAI", "Open AI"),
+            ("updateHTTPServer2", "update HTTP Server 2"),
+            ("FrobnicateValue", "Frobnicate Value"),
+            ("getElementById", "get Element By Id"),
+        ] {
+            assert_eq!(normalize(identifier), normalize(expanded), "{identifier}");
+        }
+        assert_eq!(words("getElementByID"), "get element by eye dee .");
+        assert_eq!(words("XMLParser"), "ex em ell parser .");
+    }
+
+    #[test]
+    fn whole_word_readings_and_ordinary_case_are_preserved() {
+        for (input, equivalent) in [
+            ("NoteBook", "notebook"),
+            ("McDonald", "mcdonald"),
+            ("HeLLo", "hello"),
+            ("ALICe", "alice"),
+            ("bBC", "BBC"),
+            ("tV", "TV"),
+        ] {
+            assert_eq!(normalize(input), normalize(equivalent), "{input}");
+        }
+        assert_eq!(words("NASA BBC mp3"), "nasa bee bee see em pee three .");
+    }
+
+    #[test]
+    fn identifier_expansions_retain_original_utf8_ranges_and_marks() {
+        let source = "Caf\u{e9}Parser getXMLValue2";
+        let mut tokens = vec![Token::Mark(42)];
+        let mut spans = Vec::new();
+        append_with_spans(source, &mut tokens, |_, range| spans.push(range));
+        assert_eq!(tokens[0], Token::Mark(42));
+        assert_eq!(
+            &tokens[1..3],
+            &[Token::Word("CAFE".into()), Token::Word("PARSER".into())]
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .map(|range| &source[range.clone()])
+                .collect::<Vec<_>>(),
+            [
+                "Caf\u{e9}Parser",
+                "Caf\u{e9}Parser",
+                "getXMLValue2",
+                "getXMLValue2",
+                "getXMLValue2",
+                "getXMLValue2",
+                "getXMLValue2",
+                "getXMLValue2"
+            ]
         );
     }
 

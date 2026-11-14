@@ -160,6 +160,14 @@ When rendering with `segdump`'s optional scale and output arguments, the audio u
 
 ## Pronunciation fallback
 
+Unknown mixed-case identifiers split at lower-to-upper and acronym-to-word
+boundaries (`getElementByID`, `XMLParser`). Existing whole-word dictionary
+readings and caller overrides take precedence. Each part uses the ordinary
+word, acronym and number rules; expansions retain the complete identifier's
+original UTF-8 range. Lowercase words, ordinary title case, all-caps words and
+apostrophe-containing words keep their existing behavior. This is pronunciation
+fallback, not screen-reader punctuation verbosity or symbol announcement.
+
 Pronunciation fallback folds common accented Latin letters to English lookup
 keys, including combining accents, while word events retain original UTF-8
 ranges. After exact readings and existing inflections, additional suffixes can

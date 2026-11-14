@@ -135,6 +135,7 @@ impl Utterance {
                         |token, range| {
                             origins.push((token, item, range));
                         },
+                        &self.pronunciations,
                         &|| self.cancel.is_cancelled(),
                     ) {
                         return;
@@ -343,6 +344,31 @@ mod tests {
         stream.cancel_handle().cancel();
         assert_eq!(stream.render(&mut [123; 32]), Rendered::default());
         assert!(stream.plan.is_none());
+    }
+
+    #[test]
+    fn mixed_case_expansions_preserve_pcm_marks_and_source_events() {
+        let source = "Caf\u{e9}Parser getXMLValue2";
+        let items = [Item::Mark(1), Item::Text(source), Item::Mark(2)];
+        let (samples, events) = collect(&items, 16001, 7);
+        assert_eq!(
+            samples,
+            crate::speak(&items, 16001, &Voice::default()).samples
+        );
+        assert_eq!(collect(&items, 16001, 4096), (samples, events.clone()));
+        assert_eq!(events.words.len(), 8);
+        assert!(
+            events.words[..2]
+                .iter()
+                .all(|w| &source[w.text_range.clone()] == "Caf\u{e9}Parser")
+        );
+        assert!(
+            events.words[2..]
+                .iter()
+                .all(|w| &source[w.text_range.clone()] == "getXMLValue2")
+        );
+        assert_eq!(events.marks[0], (1, 0));
+        assert!(events.marks[1].1 > events.words.last().unwrap().sample);
     }
 
     #[test]

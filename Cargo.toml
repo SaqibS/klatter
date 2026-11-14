@@ -5,5 +5,19 @@ edition = "2024"
 
 [dependencies]
 
+# Developer diagnostics live beside the Python tools; Cargo builds them as
+# examples so they never ship in the CLI, DLL or NVDA add-on.
+[[example]]
+name = "segdump"
+path = "tools/segdump.rs"
+
+[[example]]
+name = "phones"
+path = "tools/phones.rs"
+
+[[example]]
+name = "lts_accuracy"
+path = "tools/lts_accuracy.rs"
+
 [workspace]
 members = ["ffi"]

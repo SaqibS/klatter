@@ -93,6 +93,34 @@ fn scale_transition(frames: usize) -> usize {
     (frames as f64 * TRANSITION_SCALE).round() as usize
 }
 
+/// Velar closures are made wherever the tongue body sits for the vowel, so
+/// the velar F2 locus follows the vowel's F2 (a locus equation) instead of
+/// one fixed value. Fitted to Eloquence, whose velar loci are near 2,100 Hz
+/// beside IY but 1,200 to 1,700 Hz beside back vowels.
+const VELAR_LOCUS_BASE_HZ: f64 = 680.0;
+const VELAR_LOCUS_SLOPE: f64 = 0.71;
+
+/// F2 locus of the velar stop at `i`, from the vowel it releases into, or
+/// else the vowel before it.
+fn velar_f2_locus(segs: &[Seg], i: usize) -> Option<f64> {
+    let ph = segs[i].ph?;
+    if ph.class() != Class::Stop || ph.place() != Place::Velar {
+        return None;
+    }
+    let vowel = |j: usize| {
+        segs.get(j)
+            .and_then(|s| s.ph)
+            .filter(|p| p.is_vowel())
+            .map(Ph::spec)
+    };
+    let f2 = vowel(i + 1).map(|s| s.f[1]).or_else(|| {
+        i.checked_sub(1)
+            .and_then(vowel)
+            .map(|s| s.f_end.unwrap_or(s.f)[1])
+    })?;
+    Some(VELAR_LOCUS_BASE_HZ + VELAR_LOCUS_SLOPE * f2)
+}
+
 fn is_obstruent(p: Ph) -> bool {
     matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
 }
@@ -248,6 +276,11 @@ fn formant_tracks(
         };
         let mut t = targets(ph, lens[i] - outgoing);
         t.resize(lens[i], *t.last().unwrap());
+        if let Some(f2) = velar_f2_locus(segs, i) {
+            for f in &mut t {
+                f.f[1] = f2;
+            }
+        }
         if segs[i].ph == Some(Ph::HH) {
             for f in &mut t {
                 f.b = [300.0, 150.0, 200.0];
@@ -918,6 +951,27 @@ mod tests {
             frames[starts[vowel]..starts[vowel] + lens[vowel]]
                 .iter()
                 .all(|f| f.fnz == Frame::default().fnz)
+        );
+    }
+
+    #[test]
+    fn velar_locus_follows_the_vowel() {
+        let locus = |text: &str| {
+            let (segs, starts, lens, frames) = frames_for(text);
+            let g = segs.iter().position(|s| s.ph == Some(Ph::G)).unwrap();
+            frames[starts[g] + lens[g] / 2].f[1]
+        };
+        assert!(
+            locus("goo") + 300.0 < locus("geese"),
+            "{} vs {}",
+            locus("goo"),
+            locus("geese")
+        );
+        assert!(
+            locus("bog") < locus("beg"),
+            "{} vs {}",
+            locus("bog"),
+            locus("beg")
         );
     }
 

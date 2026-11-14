@@ -6,8 +6,10 @@ The DLL must match this Python's architecture.
 import os
 import sys
 import threading
+import time
 import types
 import unittest
+from unittest.mock import patch
 
 events = []
 
@@ -124,7 +126,9 @@ class DriverTest(unittest.TestCase):
     def wait(self):
         done = threading.Event()
         self.synth._queue.put((self.synth._generation, []))
+        deadline = time.monotonic() + 5
         while not any(e[0] == "done" for e in events):
+            self.assertLess(time.monotonic(), deadline, f"Speech did not finish: {events[-10:]}")
             done.wait(0.01)
 
     def test_indexes_follow_their_audio_in_order(self):
@@ -181,6 +185,66 @@ class DriverTest(unittest.TestCase):
         self.synth.speak(["broken"])
         self.wait()
         self.assertTrue(any(e[0] == "error" for e in events))
+
+    def test_stale_requests_do_not_enter_native_synthesis(self):
+        generation = self.synth._generation
+        self.synth.cancel()
+        with patch.object(self.synth._dll, "klatter_utterance_create") as create:
+            self.assertFalse(self.synth._play(generation, self.synth._voice(50), ["Stale."]))
+            create.assert_not_called()
+
+    def test_cancel_during_creation_prevents_the_first_read(self):
+        generation = self.synth._generation
+        create = self.synth._dll.klatter_utterance_create
+
+        def cancelled_create(*args):
+            utterance = create(*args)
+            self.synth.cancel()
+            return utterance
+
+        with patch.object(self.synth._dll, "klatter_utterance_create", cancelled_create):
+            with patch.object(self.synth._dll, "klatter_utterance_read") as read:
+                self.assertFalse(self.synth._play(generation, self.synth._voice(50), ["Stale."]))
+                read.assert_not_called()
+        self.assertIsNone(self.synth._active_cancel)
+
+    def test_cancel_signals_the_native_handle_before_audio_is_returned(self):
+        entered = threading.Event()
+        release = threading.Event()
+        statuses = []
+        read = self.synth._dll.klatter_utterance_read
+
+        def blocked_read(*args):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("Test did not release the native read")
+            status = read(*args)
+            statuses.append(status)
+            return status
+
+        with patch.object(self.synth._dll, "klatter_utterance_read", blocked_read):
+            self.synth.speak(["Cancelled before audio.", IndexCommand(1)])
+            try:
+                self.assertTrue(entered.wait(5))
+                self.synth.cancel()
+            finally:
+                release.set()
+            self.synth.speak(["Replacement.", IndexCommand(2)])
+            self.wait()
+        self.assertEqual(statuses[0], -2)
+        self.assertEqual([e for e in events if e[0] == "index"], [("index", 2)])
+        self.assertIsNone(self.synth._active_cancel)
+
+    def test_failed_reads_release_native_handles(self):
+        dll = self.synth._dll
+        with patch.object(dll, "klatter_utterance_read", return_value=-1):
+            with patch.object(dll, "klatter_cancel_free", wraps=dll.klatter_cancel_free) as cancel_free:
+                with patch.object(dll, "klatter_utterance_free", wraps=dll.klatter_utterance_free) as free:
+                    with self.assertRaisesRegex(RuntimeError, "could not synthesize"):
+                        self.synth._play(self.synth._generation, self.synth._voice(50), ["Hello."])
+                    cancel_free.assert_called_once()
+                    free.assert_called_once()
+        self.assertIsNone(self.synth._active_cancel)
 
 
 if __name__ == "__main__":

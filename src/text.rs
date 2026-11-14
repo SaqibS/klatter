@@ -368,22 +368,35 @@ pub fn append_normalized(text: &str, out: &mut Vec<Token>) {
 pub fn append_with_spans(
     text: &str,
     out: &mut Vec<Token>,
-    mut word: impl FnMut(usize, std::ops::Range<usize>),
+    word: impl FnMut(usize, std::ops::Range<usize>),
 ) {
-    let positions: Vec<usize> = text
-        .char_indices()
-        .map(|(i, _)| i)
-        .chain([text.len()])
-        .collect();
-    let chars: Vec<char> = text
-        .chars()
-        .map(|c| match c {
+    assert!(append_with_spans_cancellable(text, out, word, &|| false));
+}
+
+pub(crate) fn append_with_spans_cancellable(
+    text: &str,
+    out: &mut Vec<Token>,
+    mut word: impl FnMut(usize, std::ops::Range<usize>),
+    cancelled: &impl Fn() -> bool,
+) -> bool {
+    let mut positions = Vec::new();
+    let mut chars = Vec::new();
+    for (index, (offset, c)) in text.char_indices().enumerate() {
+        if index % 256 == 0 && cancelled() {
+            return false;
+        }
+        positions.push(offset);
+        chars.push(match c {
             '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{ff07}' => '\'',
             _ => fold_latin_letter(c),
-        })
-        .collect();
+        });
+    }
+    positions.push(text.len());
     let mut i = 0;
     while i < chars.len() {
+        if cancelled() {
+            return false;
+        }
         let start = i;
         let first = out.len();
         normalize_step(&chars, &mut i, out);
@@ -393,6 +406,7 @@ pub fn append_with_spans(
             }
         }
     }
+    !cancelled()
 }
 
 fn normalize_step(chars: &[char], position: &mut usize, out: &mut Vec<Token>) {
@@ -560,6 +574,19 @@ pub fn end_utterance(tokens: &mut Vec<Token>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalization_stops_between_words_after_cancellation() {
+        let cancelled = std::cell::Cell::new(false);
+        let mut tokens = Vec::new();
+        assert!(!append_with_spans_cancellable(
+            "First second third",
+            &mut tokens,
+            |_, _| cancelled.set(true),
+            &|| cancelled.get(),
+        ));
+        assert_eq!(tokens, [Token::Word("FIRST".into())]);
+    }
 
     #[test]
     fn latin_accents_fold_without_losing_original_utf8_spans() {

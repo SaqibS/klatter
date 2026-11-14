@@ -91,7 +91,8 @@ KlatterUtterance *klatter_utterance_create(
    no work is done and 1 means still active. Metadata is borrowed until the next
    read/free; expanded words may share original UTF-8 byte ranges. Inspect events
    even when sample_count is zero. Already queued device audio remains the host's
-   responsibility. Acoustic planning in progress cannot be interrupted. */
+   responsibility. Planning polls cancellation between source tokens, segments
+   and pitch frames; individual lookups and allocations are not preemptible. */
 int klatter_utterance_read(KlatterUtterance *utterance, int16_t *output,
                           size_t capacity, KlatterPullBlock *block);
 void klatter_utterance_free(KlatterUtterance *utterance);

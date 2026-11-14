@@ -30,7 +30,16 @@ class KlatterSpeech(ctypes.Structure):
                 ("mark_samples", ctypes.POINTER(ctypes.c_size_t)), ("mark_count", ctypes.c_size_t)]
 
 
-SpeechCallback = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(KlatterSpeech), ctypes.c_void_p)
+class KlatterWord(ctypes.Structure):
+    _fields_ = [("input_item", ctypes.c_size_t), ("byte_offset", ctypes.c_size_t),
+                ("byte_length", ctypes.c_size_t), ("sample", ctypes.c_size_t)]
+
+
+class KlatterPullBlock(ctypes.Structure):
+    _fields_ = [("sample_count", ctypes.c_size_t),
+                ("mark_ids", ctypes.POINTER(ctypes.c_uint32)),
+                ("mark_samples", ctypes.POINTER(ctypes.c_size_t)), ("mark_count", ctypes.c_size_t),
+                ("words", ctypes.POINTER(KlatterWord)), ("word_count", ctypes.c_size_t)]
 
 
 def load_engine(path):
@@ -40,10 +49,23 @@ def load_engine(path):
     dll.klatter_speak.argtypes = [ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(ctypes.c_uint32),
                                   ctypes.c_size_t, ctypes.c_uint32, ctypes.POINTER(KlatterVoice)]
     dll.klatter_speak.restype = ctypes.POINTER(KlatterSpeech)
-    dll.klatter_speak_stream.argtypes = dll.klatter_speak.argtypes + [SpeechCallback, ctypes.c_void_p]
-    dll.klatter_speak_stream.restype = ctypes.c_int
     dll.klatter_free.argtypes = [ctypes.POINTER(KlatterSpeech)]
     dll.klatter_free.restype = None
+    dll.klatter_utterance_create.argtypes = dll.klatter_speak.argtypes + [ctypes.c_void_p]
+    dll.klatter_utterance_create.restype = ctypes.c_void_p
+    dll.klatter_utterance_read.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int16), ctypes.c_size_t,
+        ctypes.POINTER(KlatterPullBlock),
+    ]
+    dll.klatter_utterance_read.restype = ctypes.c_int
+    dll.klatter_utterance_free.argtypes = [ctypes.c_void_p]
+    dll.klatter_utterance_free.restype = None
+    dll.klatter_utterance_cancel_handle.argtypes = [ctypes.c_void_p]
+    dll.klatter_utterance_cancel_handle.restype = ctypes.c_void_p
+    dll.klatter_cancel.argtypes = [ctypes.c_void_p]
+    dll.klatter_cancel.restype = None
+    dll.klatter_cancel_free.argtypes = [ctypes.c_void_p]
+    dll.klatter_cancel_free.restype = None
     return dll
 
 
@@ -71,29 +93,6 @@ def speak_items(dll, items, voice):
         return speech_data(result.contents)
     finally:
         dll.klatter_free(result)
-
-
-def stream_items(dll, items, voice, on_chunk):
-    """Calls on_chunk with bounded PCM blocks; False cancels native synthesis."""
-    texts, marks = encode_items(items)
-    errors = []
-
-    @SpeechCallback
-    def callback(block, context):
-        try:
-            return int(on_chunk(*speech_data(block.contents)))
-        except Exception as error:
-            # Python exceptions cannot propagate through a native callback.
-            errors.append(error)
-            return 0
-
-    status = dll.klatter_speak_stream(texts, marks, len(items), SAMPLE_RATE,
-                                    ctypes.byref(voice), callback, None)
-    if errors:
-        raise errors[0]
-    if status < 0:
-        raise ValueError("Klatter rejected the input or could not synthesize it")
-    return status == 1
 
 
 def make_voice(default, rate, pitch, inflection, volume):
@@ -138,6 +137,8 @@ class SynthDriver(BaseSynthDriver):
         )
         # Bumped by cancel; work tagged with an older generation is abandoned.
         self._generation = 0
+        self._cancel_lock = threading.Lock()
+        self._active_cancel = None
         self._queue = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="klatter", daemon=True)
         self._thread.start()
@@ -190,18 +191,23 @@ class SynthDriver(BaseSynthDriver):
                 pitch = item.newValue
         if items:
             utterances.append((self._voice(pitch), items))
-        self._queue.put((self._generation, utterances))
+        with self._cancel_lock:
+            self._queue.put((self._generation, utterances))
 
     def _voice(self, pitch):
         return make_voice(self._default, self.rate, pitch, self.inflection, self.volume)
 
     def cancel(self):
-        self._generation += 1
-        while True:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                break
+        # The lock protects the native handle from being freed while cancellation uses it.
+        with self._cancel_lock:
+            self._generation += 1
+            if self._active_cancel is not None:
+                self._dll.klatter_cancel(self._active_cancel)
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
         self._player.stop()
 
     def pause(self, switch):
@@ -230,8 +236,52 @@ class SynthDriver(BaseSynthDriver):
 
     def _play(self, generation, voice, items):
         """Returns False once this generation is cancelled."""
-        return stream_items(self._dll, items, voice,
-                            lambda audio, marks: self._feed(generation, audio, marks))
+        if generation != self._generation:
+            return False
+        texts, marks = encode_items(items)
+        utterance = self._dll.klatter_utterance_create(
+            texts, marks, len(items), SAMPLE_RATE, ctypes.byref(voice), None,
+        )
+        if not utterance:
+            raise ValueError("Klatter rejected the input")
+        cancel = None
+        try:
+            cancel = self._dll.klatter_utterance_cancel_handle(utterance)
+            if not cancel:
+                raise RuntimeError("Klatter could not create a cancellation handle")
+            with self._cancel_lock:
+                if generation != self._generation:
+                    return False
+                self._active_cancel = cancel
+            output = (ctypes.c_int16 * (FEED_BYTES // BYTES_PER_SAMPLE))()
+            block = KlatterPullBlock()
+            position = 0
+            while generation == self._generation:
+                status = self._dll.klatter_utterance_read(
+                    utterance, output, len(output), ctypes.byref(block),
+                )
+                if status == -2:
+                    return False
+                if status < 0:
+                    raise RuntimeError("Klatter could not synthesize the utterance")
+                audio = ctypes.string_at(output, block.sample_count * BYTES_PER_SAMPLE)
+                offsets = [
+                    (block.mark_ids[k], (block.mark_samples[k] - position) * BYTES_PER_SAMPLE)
+                    for k in range(block.mark_count)
+                ]
+                if not self._feed(generation, audio, offsets):
+                    return False
+                position += block.sample_count
+                if status == 0:
+                    return True
+            return False
+        finally:
+            with self._cancel_lock:
+                if self._active_cancel == cancel:
+                    self._active_cancel = None
+                if cancel is not None:
+                    self._dll.klatter_cancel_free(cancel)
+            self._dll.klatter_utterance_free(utterance)
 
     def _feed(self, generation, audio, marks):
         if generation != self._generation:

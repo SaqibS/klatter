@@ -27,8 +27,13 @@ const NASALIZE_AFTER_MS: f64 = 30.0;
 const AFFRICATE_RELEASE_SHARE: f64 = 0.65;
 
 /// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
-/// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII).
-const MODAL_OQ: f64 = 50.0;
+/// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII). Eloquence's
+/// corrected H1*-H2* is about +1.3 dB at every rate; the modal open quotient
+/// falls between the values that match it in sustained vowels (56%) and at a
+/// normal rate (50%), where breathiness ramps fill more of each vowel. Up to
+/// 56%, it leaves the source's energy above 500 Hz unchanged relative to its
+/// 250-500 Hz band.
+const MODAL_OQ: f64 = 54.0;
 const BREATHY_OQ: f64 = 80.0;
 const BREATHY_TL: f64 = 20.0;
 const BREATHY_AH: f64 = 52.0;

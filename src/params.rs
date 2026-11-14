@@ -27,8 +27,11 @@ const NASALIZE_AFTER_MS: f64 = 30.0;
 const AFFRICATE_RELEASE_SHARE: f64 = 0.65;
 
 /// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
-/// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII).
-const MODAL_OQ: f64 = 50.0;
+/// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII). The modal
+/// open quotient lies between 50% and 56%. Up to
+/// 56%, it leaves the source's energy above 500 Hz unchanged relative to its
+/// 250-500 Hz band.
+const MODAL_OQ: f64 = 54.0;
 const BREATHY_OQ: f64 = 80.0;
 const BREATHY_TL: f64 = 20.0;
 const BREATHY_AH: f64 = 52.0;

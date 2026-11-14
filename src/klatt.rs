@@ -30,13 +30,15 @@ const FT: f64 = 2150.0;
 const BT: f64 = 180.0;
 /// Frication-excited parallel bandwidths B2F..B6F.
 const PARALLEL_BW: [f64; 5] = [250.0, 320.0, 350.0, 500.0, 1500.0];
-/// Cascade formants above F3 at natural male spacing. Poles up to and beyond
-/// the output band keep vowels' 3.5-5 kHz energy, which KLSYN88's 10 kHz-era
-/// F4/F5 alone lose at higher sample rates.
+/// Cascade formants above F3 at natural male spacing. F4 and F5 form a
+/// 3.6-3.9 kHz cluster in sustained vowels, with the valley below
+/// it. Poles up to and beyond the output band keep vowels' 3.5-5 kHz energy,
+/// which KLSYN88's 10 kHz-era F4/F5 alone lose at higher sample rates; the
+/// 4.7 kHz pole is broad so the cluster's upper skirt falls steeply.
 const CASCADE_HIGH: [(f64, f64); 4] = [
-    (3400.0, 300.0),
+    (3600.0, 300.0),
     (3900.0, 200.0),
-    (4700.0, 500.0),
+    (4700.0, 1200.0),
     (6000.0, 700.0),
 ];
 /// Aspiration keeps KLSYN88's F4/F5 instead: through CASCADE_HIGH it hisses.
@@ -250,9 +252,11 @@ impl Peaking {
 }
 
 /// Only voicing needs presence; aspiration and frication have their own shaping.
+/// Together with the vowels' sharp F2 and F3 peaks, it brightens voicing
+/// at 1-4 kHz, which listeners prefer.
 const PRESENCE_HZ: f64 = 2200.0;
 const PRESENCE_OCTAVES: f64 = 1.7;
-const PRESENCE_DB: f64 = 5.0;
+const PRESENCE_DB: f64 = 4.0;
 
 /// Bandwidth of the 0 Hz low-pass resonator that attenuates by `tl` dB at
 /// 3 kHz; the paper defines TL by that attenuation.
@@ -787,7 +791,7 @@ mod tests {
         for sr in [8000.0, 16000.0, 16001.0, 22050.0, 44100.0, 48000.0] {
             let p = Peaking::new(PRESENCE_HZ, PRESENCE_OCTAVES, PRESENCE_DB, sr);
             let db = |f: f64| 20.0 * p.gain_at(f, sr).log10();
-            assert!((db(2200.0) - 5.0).abs() < 0.01, "{sr}");
+            assert!((db(2200.0) - PRESENCE_DB).abs() < 0.01, "{sr}");
             assert!(db(50.0).abs() < 0.1 && db(0.49 * sr).abs() < 0.5, "{sr}");
         }
     }

@@ -1,20 +1,24 @@
-# Klatter - A modern implementation of Dennis Klatt's 1980 TTS engine
+# Klatter
 
-This is a modern TTS engine written in Rust, based on Dennis Klatt's 1980's research.
+Klatter is a formant text-to-speech engine for screen readers, written in Rust. It is a clean-room implementation built only from published research papers.
 
-The core engine is based on the [original 1980 paper](https://www.fon.hum.uva.nl/david/ma_ssp/2009/klatt-1980-JAS000971.pdf) and the [broader 1987 architectural paper](https://sail.usc.edu/~lgoldste/Ling582/Week%2013/Klatt1987.pdf). The paper is based on these papers, without reusing existing source code.
+## Why Klatter?
 
-It was then improved based on [this 1990 paper](https://www.fon.hum.uva.nl/david/ma_ssp/doc/Klatt-1990-JAS000820.pdf).
+Many blind screen-reader users have listened to ETI-Eloquence for decades and still prefer it to modern neural voices. The reasons are practical rather than aesthetic:
 
-It was then improved using Susan Hertz's papers, whose work also underlies the ETI-Eloquence engine:
+- **Intelligibility.** Every phoneme is rendered with its full set of acoustic cues, so words are easy to identify even out of context.
+- **Compact articulation.** Short, crisp segments that do not smear together.
+- **Clarity at high speaking rates.** Experienced users listen at 300 to 900 words per minute.
+- **Comfortable prolonged listening.** A stable, predictable voice that is tolerable for a whole working day.
+- **Responsiveness.** Speech starts and stops immediately as the user moves around an interface.
 
-- [English text to speech rules with Delta (1986)](https://www.academia.edu/56835165/English_text_to_speech_conversion_with_delta): splitting words into roots and suffixes before letter-to-sound conversion.
-- [A nucleus-based timing model applied to multi-dialect speech synthesis by rule (1992)](https://www.isca-archive.org/icslp_1992/hertz92_icslp.pdf): timing the vowel and its following liquids and glides as one nucleus, and shortening the voiced vowel after aspiration.
-- [Language-universal and language-specific components in the multi-language ETI-Eloquence text-to-speech system (1999)](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf): transition timings, the timing inside AY, AW and OY, and where the accent peak falls.
+Eloquence is proprietary, no longer actively developed, and distributed as a 32-bit Windows library. Klatter asks whether an open, modern engine can deliver the same qualities by going back to the research that formant synthesizers like Eloquence grew out of: Dennis Klatt's synthesizer and rules, and Susan Hertz's work on timing and synthesis control.
 
-In addition to the engine, there is a command-line tool which accepts input and output paths, and a speaking rate.
+Klatter is not a copy of Eloquence and does not sound like the same speaker. It aims for Eloquence's qualities, and was tuned by measuring Eloquence's output as a black box (see [How Klatter was built](#how-klatter-was-built)).
 
-## Building and running
+## Using Klatter
+
+### Command line
 
 ```
 cargo build --release
@@ -22,175 +26,134 @@ target\release\klatter in.txt out.wav
 target\release\klatter -r 300 in.txt out.wav
 ```
 
-The rate is in words per minute, as with `say -r` (`--rate=300` also works); the default is Klatter's natural rate of 220. Every segment and pause scales by the same factor. Breathiness ramps scale with the rate so they do not spread across entire vowels at fast rates. Other acoustic transition timings retain their nominal durations, constrained by the available segment frames.
-
-The output is a 16 kHz, 16-bit mono WAV file at a fixed gain, so short and long utterances keep their natural relative loudness. Repeated calls to `klatt::Synth::render` on the same synthesizer preserve both synthesis state and fractional-sample timing, so rendering frames in chunks produces the same samples as rendering them together. The project uses no third-party crates.
-
-Raw CMUdict is bundled with the engine as the authoritative source. Cargo
-validates it and generates the sorted embedded lookup table without requiring
-Python or network access. The pinned source identity is in
-`data/cmudict/README.txt`. Redistributions must include `data/cmudict/LICENSE.txt`;
-the NVDA builder includes it automatically.
-
-### Library
-
-`klatter::synthesize(text, sample_rate)` returns samples at any sample rate. For hosts such as screen readers, `klatter::speak(items, sample_rate, voice)` takes a `Voice` and a list of `Item`s: text interleaved with numbered marks. It speaks the items as one utterance, so a mark does not break the phrasing, and returns the samples together with the sample index each mark falls on. `Voice` is in physical units: words per minute, a pitch baseline in Hz (93 by default; the whole contour moves with it), an inflection multiplier that stretches the contour around that baseline (0 is monotone), and a linear volume. Hosts map their own scales onto these.
-
-For caller-specific readings, construct a `Pronunciations`, insert entries such
-as `insert("read", "R EH1 D")`, and pass it to `speak_with_pronunciations` or
-`speak_stream_with_pronunciations`. Entries override built-in readings and
-CMUdict, and can supply roots for unknown inflections. Vowels require stress
-digits 0, 1 or 2; consonants must not have digits. Invalid entries return an
-error without replacing an existing entry. Overrides are caller-owned, not
-global; normal connected-speech deaccenting still applies.
-
-Relevant sources for further general rules:
-
-- [Hertz, Younes and Zinovieva (1999), section 3](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf): explicit phones and transitions, nucleus duration allocation, and context-dependent values at phone edges.
-- [eSpeak NG phoneme tables](https://github.com/espeak-ng/espeak-ng/blob/master/docs/phontab.md): context-sensitive phoneme variants, consonant effects on vowel length, and separately specified vowel entry/exit transitions. Its [length calculation](https://github.com/espeak-ng/espeak-ng/blob/master/src/libespeak-ng/setlengths.c) also considers following consonants, stress and syllable position. No code or tables are imported.
-- [Festival duration module](https://github.com/festvox/festival/blob/master/lib/duration.scm): both hand-written Klatt rules and CART-based duration models, including phone-normalized log-duration predictions. Klatter does not use a learned duration model.
-- [CMUdict](https://github.com/cmusphinx/cmudict): the bundled English pronunciation dictionary. It is not a duration or acoustic-trajectory model, and its maintainers explicitly caution that entries can contain errors.
-
-### C interface
-
-The `ffi` crate builds `klatter.dll` with the C functions declared in `ffi/klatter.h`. `klatter_speak` takes parallel arrays of UTF-8 strings and mark ids (a null string means "mark here") plus a `KlatterVoice`, and returns 16-bit samples and mark positions that the caller releases with `klatter_free`. It returns null for invalid input and never unwinds a panic into the caller.
-
-The additive pull API creates a `KlatterUtterance`, then fills host-owned buffers
-with `klatter_utterance_read`. It copies text and snapshots an optional
-`KlatterPronunciations` dictionary. Word events contain the original input-item
-index, UTF-8 byte range, and absolute sample position; number and acronym
-expansions can share a source range. Manual marks remain independent. Metadata
-is borrowed until the next read/free. Rust hosts use `Utterance::new` and `render`.
-
-Obtain a separate cancel handle before starting reads. It may be cancelled from
-another thread and outlive its utterance; it never affects a different utterance.
-The host remains responsible for flushing already queued playback audio. Pull
-reads return 1 for output/events, 0 for EOF, -2 for cancellation, and -1 for invalid
-input/failure. An empty output buffer does not advance the utterance.
-
-Pull rendering preserves whole-utterance acoustic planning and exact PCM,
-independently of buffer size. Cancellation is checked per emitted sample and
-during normalization, pronunciation and acoustic planning, including each pitch
-frame. Individual lookups, allocations and some processing passes are not
-preemptible. Source text and overrides
-are copied upfront; creating an utterance does no acoustic planning until its
-first nonempty read.
+`-r 300` (or `--rate=300`) sets the speaking rate in words per minute.
 
 ### NVDA add-on
 
-`nvda/addon` holds an NVDA synthesizer driver that loads `klatter.dll` with ctypes. It supports rate, pitch, inflection and volume, index marks and mid-utterance pitch changes; NVDA's 0-100 settings map onto `KlatterVoice`, with 50 giving Klatter's natural voice and each 50 steps doubling or halving the rate or pitch. NVDA is a 64-bit x86 program, so the add-on carries an x64 DLL, which runs under emulation on ARM64 Windows.
-
-The worker pulls PCM through the cancellable C API. NVDA cancellation signals
-the active native utterance as well as stopping playback and clearing queued
-requests. Stale requests are rejected before planning or feeding audio; index
-notifications remain tied to playback completion of their preceding audio.
+`nvda/addon` contains a synthesizer driver for the NVDA screen reader. It supports rate, pitch, inflection and volume, index marks for cursor tracking, and mid-utterance pitch changes (NVDA uses these for capital letters). NVDA's 0-100 settings map onto Klatter's voice settings: 50 is Klatter's natural voice, and each 50 steps doubles or halves the rate or pitch.
 
 ```
 rustup target add x86_64-pc-windows-msvc
 python nvda\build.py
 ```
 
-This writes `target\klatter-<version>.nvda-addon`; open it to install it in NVDA, then restart NVDA and choose Klatter in the Speech settings. `python nvda\test_driver.py target\release\klatter.dll` tests the driver against stand-ins for NVDA's modules; the DLL must match the Python interpreter's architecture.
+This writes `target\klatter-<version>.nvda-addon`. Open it to install, restart NVDA, and choose Klatter in the Speech settings. NVDA is a 64-bit x86 program, so the add-on carries an x64 DLL; it also runs under emulation on ARM64 Windows.
 
-## Pipeline
+Stopping speech (for example, pressing Control) cancels the native utterance as well as stopping playback, so a long paragraph that is still being planned does not delay the next utterance.
 
-1. `text.rs` normalizes the text. It expands numbers, years, ordinals, money, percentages and common abbreviations, spells out acronyms, and splits clauses at punctuation. Typographic apostrophes are normalized before word splitting. Negative numbers retain their sign, and numbers with thousands separators are read as quantities rather than years.
-2. `lexicon.rs` tries hand-written pronunciation overrides, then exact matches in CMUdict. Unmatched words go through `morph.rs`, which strips inflectional suffixes, looks up the root, and adds a suffix pronunciation matching the root's last sound. Remaining words use `lts.rs` letter-to-sound rules and stress heuristics.
-3. `utterance.rs` syllabifies each word and marks function words and phrase-final syllables.
-4. `prosody.rs` applies Klatt's segment duration rules, retuned toward Eloquence's even, syllable-timed rhythm: stressed vowels, stop closures and fricatives are shorter than Klatt's values, and unstressed vowels in content words are longer, except in phrase-final syllables, which are already lengthened. Pauses are short (100 ms at commas, 200 ms at sentence ends); boundaries are marked mostly by pitch, and phrase-final vowels are not lengthened beyond escaping non-final shortening, which avoids drawled sentence ends. A vowel and the liquids and glides after it in the same syllable are timed as one nucleus, so a longer coda leaves less time for the vowel. Aspiration after a voiceless stop lengthens the syllable while shortening the following sonorant's voiced portion, subject to its minimum duration. The pitch contour is a hat pattern with declination and microprosody: a voiceless consonant raises the onset of the following sonorant by 8% and a voiced one lowers it by 4%, decaying over 50 ms. Each accent peaks about three quarters of the way through its nucleus. Clauses without pitch accents still receive a terminal contour, starting at their last vowel.
-5. `params.rs` turns the phonemes into 5 ms parameter frames using synthesis-by-rule targets and transitions. Formant transitions request about 15 ms after fricatives and 35 ms after aspirated stops, and close quickly after an offglide. That is half the published rule timings, because Eloquence reaches its vowel targets that quickly; vowel targets are citation-form values fitted to Eloquence's sustained vowels, with EY, OW and UW as true diphthongs, because targets measured from running speech are already undershot and the transitions would undershoot them again, merging vowels such as EH and IH. Velar stops take their F2 locus from the adjacent vowel's F2, as Eloquence's do, so it is high beside front vowels and low beside back vowels. Nasal formants are fitted to Eloquence's. Vowels are nasalized over their last and first 30 ms next to a nasal, and affricates spend about two thirds of their time as frication. Every stop closure, voiced or voiceless, carries a low voice-bar murmur, so speech doesn't break into silence mid-phrase. Voicing and fricative noise cross-fade over about 25 ms at segment boundaries, as Eloquence does, so sounds don't appear spliced together; stop bursts stay abrupt. Vowel formant bandwidths are nearly uniform, about 100, 105 and 130 Hz for F1-F3, as Eloquence's are. Vowel voicing levels vary so vowels are as evenly loud as Eloquence's, nasals are as loud as Eloquence's, and /h/ is voiced with noise on top, as Eloquence's is, rather than pure noise. Incoming and outgoing windows share the segment's available time without overlapping, preserving aspiration and a target frame. AY, AW and OY use an 80 ms glide and then hold the offglide for 50 ms, as Eloquence does, when the available duration permits, with time reserved for the outgoing transition; short diphthongs scale proportionally. These durations are modeling choices informed by the papers, not a complete implementation of Hertz's phone-and-transition model. Following the 1990 paper, vowels become breathier toward an offset into silence, next to voiceless consonants, and in unstressed or phrase-final syllables. Breathier voicing means a higher open quotient, more spectral tilt, aspiration noise and wider first and second formant bandwidths. Voicing also weakens by about 10 dB as it fades into silence.
-6. `klatt.rs` contains KLSYN88, the cascade/parallel formant synthesizer as described in the 1990 paper. The KLGLOTT88 voicing source runs at four times the output rate so pitch periods can be a fraction of a sample long. It has open quotient, a spectral tilt filter, flutter and diplophonia controls. The first formant can change while the glottis is open, and a tracheal pole-zero pair can be added. Above F3 the cascade uses fixed resonances at 3.6, 3.9, 4.7 (broad) and 6 kHz, matching the F4-F5 cluster of Eloquence's vowels and keeping their energy at 3.5-5 kHz. Only voicing passes these; aspiration noise keeps F4/F5 at 3.25 and 3.7 kHz so breath doesn't hiss, and the parallel frication branch keeps its own F4-F6.
-7. `lib.rs` applies the voice settings: it scales durations for the rate and reshapes the F0 contour for pitch and inflection before synthesis, then applies the gain and volume.
-8. `wav.rs` writes the WAV file.
+### Rust library
 
-Pauses do not restart voicing, and retain the preceding sound's formants, nasalization and tilt while it decays, until the next onset needs its own settings. The synthesizer interpolates cascade formant frequencies and bandwidths sample by sample between parameter frames, including across rendering calls, so changing a ringing filter does not introduce a sudden coefficient step.
+```rust
+use klatter::{speak, Item, Voice};
 
-## Regression coverage
-
-Regression tests cover consonant-cluster shortening, terminal intonation in unaccented clauses, aspiration and offglide timing, typographic apostrophes, grouped and negative numbers, plural roots and stress preservation, the AW vowel in DOWN and its inflections, and incremental rendering at fractional samples per frame. Rendering chunk sizes are checked for exact waveform equivalence. These checks establish correctness of the specified behaviors, not perceived voice quality.
-
-Rate-specific checks cover the relative timing of breathy offsets and preservation of a less breathy vowel core at faster rates. Pause tests check that voicing does not leak into pauses and that ringing tract settings are retained. Source tests cover abrupt formant-change transients and check that open-glottis modulation follows the decimation filter's delay, keeping noise modulation and open-phase formant changes aligned with the glottal flow at different pitches and sample rates.
-
-## Listening and pronunciation diagnostics
-
-```
-python tools\listen.py passage.txt baseline.exe candidate.exe --out work\listening --wpm 300
-cargo run --release --example phones < passage.txt
-cargo run --release --example lts_accuracy
+let voice = Voice { wpm: 350.0, ..Voice::default() };
+let speech = speak(&[Item::Text("Link, visited."), Item::Mark(7)], 22050, &voice);
+// speech.samples: i16 PCM; speech.marks: (7, sample index where the mark falls)
 ```
 
-The listening tool measures actual rate, matches active-speech RMS with shared
-clipping headroom, and presents one blind pair per paragraph. Its question is
-spoken in the audio. Order is balanced across trials, replay uses the same WAV,
-and `manifest.json` records the seed, text, engine settings, executable hashes,
-levels, actual rates and votes. Keep the manifest hidden until voting.
-`--render-only` prepares clips without playback; an existing output directory
-is never overwritten. Calibration trims edge silence but retains internal pauses.
+- `Voice` uses physical units: words per minute, a pitch baseline in Hz (100 by default; the whole contour moves with it), an inflection multiplier (0 is monotone, 1 natural) and a linear volume. Hosts map their own scales onto these.
+- `Item`s interleave text with numbered marks. All items are spoken as one utterance, so a mark never breaks the phrasing.
+- Any sample rate is supported.
+- For screen readers, `Utterance` pulls audio into host-owned buffers of any size and reports word events with the original text position (including for expanded numbers and abbreviations). Each utterance has a cancel handle that can be used from another thread. The audio is identical regardless of buffer size.
+- `Pronunciations` holds caller-owned overrides, such as `insert("read", "R EH1 D")`, which take precedence over the built-in dictionary.
 
-The default two-executable comparison needs only Python's standard library.
-The adapters also support installed SAPI voices, Eloquence (`ECI_DLL` selects an
-installed DLL), and eSpeak (`espeakng-loader` required). Comparing different
-sample rates requires SciPy; clips are resampled to the highest native rate.
-External engines and recognizer models are not bundled or downloaded.
+### C interface
 
-`phones` reports intended pronunciations after normalization. `lts_accuracy`
-measures raw letter-to-sound agreement against first CMUdict readings, without
-morphology or stress scoring. This is a diagnostic, not a listening-quality
-score or an estimate of real unknown-word accuracy.
+The `ffi` crate builds `klatter.dll`, declared in `ffi/klatter.h`.
 
-The Rust diagnostics (`phones`, `lts_accuracy` and `segdump`) live in `tools`
-with the Python tools. Cargo builds them as examples, so they are not part of
-the CLI, DLL or NVDA add-on.
+- `klatter_speak` returns a whole utterance's samples and mark positions.
+- `klatter_utterance_create` / `klatter_utterance_read` provide pull rendering with word events and a thread-safe cancel handle (`klatter_utterance_cancel_handle`, `klatter_cancel`).
+- `klatter_pronunciations_*` manage pronunciation overrides.
 
-## Voice metrics
+Functions return null or a negative status for invalid input and never unwind a Rust panic into the caller. The header documents ownership and threading rules.
+
+## How Klatter was built
+
+### Clean-room approach
+
+- **Literature only.** The engine was implemented from the published papers listed below. No source code from any other TTS engine was read or consulted at any stage.
+- **Eloquence as a black box.** Eloquence was used only as an acoustic reference: recordings of it reading *Alice's Adventures in Wonderland*, and audio rendered through its public ECI programming interface, including its reported phoneme timing. Its binaries were never disassembled or inspected. No Eloquence audio or data is included in this repository.
+- **Built with an AI coding agent.** Klatter was developed with GitHub Copilot CLI as an AI coding agent working under the author's direction. The agent wrote code and analysis tools, ran measurements and prepared listening tests, under the same literature-only rules. The author set the goals, judged every listening test and decided what to keep.
+
+### Papers and how they were used
+
+| Paper | Used for |
+|---|---|
+| [Klatt (1980), *Software for a cascade/parallel formant synthesizer*](https://www.fon.hum.uva.nl/david/ma_ssp/2009/klatt-1980-JAS000971.pdf) | The cascade/parallel synthesizer structure, resonator and antiresonator equations, the parameter set, and vowel and consonant formant targets. |
+| [Klatt (1987), *Review of text-to-speech conversion for English*](https://sail.usc.edu/~lgoldste/Ling582/Week%2013/Klatt1987.pdf) | Segment duration rules (the `MIN + (INH - MIN) x PRCNT` model), locus theory, aspiration and voice onset time, phrase-final lengthening, and intonation. The numeric inherent and minimum durations are Klatt's (1979) values as summarized there. |
+| [Klatt & Klatt (1990), *Analysis, synthesis, and perception of voice quality variations among female and male talkers*](https://www.fon.hum.uva.nl/david/ma_ssp/doc/Klatt-1990-JAS000820.pdf) | The KLSYN88 synthesizer and its KLGLOTT88 voicing source: open quotient, spectral tilt, flutter, double pulsing, open-phase F1 changes, and breathy phonation toward voiceless consonants and silence. |
+| [Hertz, Kadin & Karplus (1985), *The Delta rule development system for speech synthesis from text*](https://users.soe.ucsc.edu/~karplus/papers/delta-85.pdf) | Representing speech as coordinated streams, and splitting words into roots and suffixes before letter-to-sound conversion. |
+| [Hertz & Huffman (1992), *A nucleus-based timing model applied to multi-dialect speech synthesis by rule*](https://www.isca-archive.org/icslp_1992/hertz92_icslp.pdf) | Timing a vowel and its following liquids and glides as one nucleus, and shortening the voiced vowel after aspiration. |
+| [Hertz, Younes & Zinovieva (1999), *Language-universal and language-specific components in the multi-language ETI-Eloquence text-to-speech system*](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf) | Phones joined by explicit transitions, example transition timings, diphthong glide timing, and accent-peak placement. This is the published description of Eloquence's own design. |
+
+Modern neural and hybrid formant research ([KLATTSTAT, 2010](https://www.isca-archive.org/ssw_2010/anumanchipalli10b_ssw.pdf); [speaker-independent neural formant synthesis, 2023](https://arxiv.org/abs/2306.01957); [HiFi-Glot](https://arxiv.org/abs/2409.14823); [ARIS](https://arxiv.org/abs/2609.29923)) was read as background. It was not adopted: learned models trade determinism, latency and behaviour at extreme speaking rates for naturalness, and screen-reader users depend on the former.
+
+### Where Klatter departs from the papers
+
+Some values were fitted to measurements of Eloquence's output instead of taken from the papers. They are deliberate and documented in the code:
+
+- **Even rhythm.** Stressed vowels are shorter and unstressed vowels in content words longer than Klatt's rules give, matching Eloquence's evenly timed syllables (except in phrase-final syllables, which are already lengthened).
+- **Faster transitions.** Formant transitions take about half the durations of Hertz's published examples, because Eloquence reaches its vowel targets that quickly.
+- **Vowel and nasal targets.** Vowel formants and bandwidths, nasal formants and relative loudness are fitted to Eloquence's sustained vowels and murmurs.
+- **Velar loci.** /k/ and /g/ take their F2 locus from the neighbouring vowel, following a locus equation fitted to Eloquence's onsets.
+- **Brighter voicing.** A gentle presence boost on voicing only, and fixed upper formants placed to keep energy at 3.5-5 kHz, give Klatter more high-frequency clarity than Eloquence's 11 kHz output.
+
+### Pipeline
+
+1. **Text** (`text.rs`) expands numbers, abbreviations, acronyms and identifiers, folds accents, and splits clauses at punctuation, keeping each word's original UTF-8 position.
+2. **Pronunciation** (`lexicon.rs`, `morph.rs`, `lts.rs`) tries caller overrides, a small built-in table, then CMUdict. Unknown words go through suffix analysis, conservative compound splitting, and finally letter-to-sound rules with stress heuristics.
+3. **Structure** (`utterance.rs`) syllabifies words and marks function words and phrase-final syllables.
+4. **Prosody** (`prosody.rs`) applies the duration rules, nucleus timing and aspiration, then builds the pitch contour: a hat pattern with declination, accent peaks about three quarters of the way through the nucleus, boundary tones for statements, questions and commas, and consonant microprosody. Pauses are 165 ms at commas and 385 ms at sentence ends at the natural rate, and shrink faster than speech as the rate rises.
+5. **Acoustics** (`params.rs`) turns phonemes into 5 ms parameter frames: formant targets and transitions, stop closures with a low voice bar, bursts, aspiration, frication, nasalization, and voicing and noise cross-fades so sounds are not spliced together.
+6. **Synthesis** (`klatt.rs`) is KLSYN88. The voicing source runs at four times the output rate, so pitch periods need not be whole samples, and formant frequencies glide sample by sample between frames so changing a ringing filter never clicks.
+7. **Voice settings** (`lib.rs`) scale durations for rate and reshape the pitch contour for pitch and inflection.
+
+### How changes were evaluated
+
+Speech quality cannot be unit-tested, so every audible change was judged by listening, using tools in `tools/`:
+
+- **Blind A/B tests, one pair at a time.** Both versions are calibrated to the same measured speaking rate and loudness, presented in random order, with the question spoken in the audio. Changes were kept only when preferred, or when they measurably moved toward the reference without sounding worse.
+- **Measurements against Eloquence.** Eloquence's phoneme timing and audio were obtained through its public interface, and compared with Klatter's formant tracks, durations, pitch, pauses and voice-source measures, after validating each measurement method on Klatter, whose true values are known.
+- **Regression tests** pin behaviour that should not change: duration rules, number and text normalization, pronunciation fallbacks, exact equality of audio rendered in different buffer sizes and sample rates, cancellation, and the C interface.
+
+One finding is worth recording for future work. Matching pitch, timing, sample rate, voice-source pulse shape and steady vowels did not make Klatter sound like the same speaker as Eloquence. Source/filter cross-synthesis showed that Eloquence's voice identity lives in its time-varying spectral envelope: the way consonants, transitions and vowels change together, rather than any single region or parameter.
+
+## Development
 
 ```
-python tools\voice_metrics.py reference.wav candidate.wav
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+python -m unittest discover -s tools
+python nvda\test_driver.py target\release\klatter.dll
 ```
 
-Compares a rendering against a reference recording of the same text using metrics that do not depend on speaking rate: F0 distribution, H1-H2, median F1-F3, pause frequency and length, and long-term spectrum bands relative to 250-500 Hz. Each difference is expressed in tolerances, and the score is their root mean square (0 means a match). Worst mismatches are listed first. Requires Python with numpy, and 16-bit WAV at 16 kHz or above.
+The NVDA driver test uses stand-ins for NVDA's modules; the DLL must match the Python interpreter's architecture.
 
-## Matching a reference voice
+CMUdict is bundled as `data/cmudict/cmudict.dict` and is the single source of dictionary pronunciations. Cargo validates it and generates the embedded lookup table at build time, without Python or network access. Its pinned identity is in `data/cmudict/README.txt`.
 
-```
-cargo run --release --example segdump -- text.txt > work\segs.tsv
-powershell -ExecutionPolicy Bypass -File tools\eloquence\asr_words.ps1 work\reference.wav work\words.tsv
-python tools\eloquence\align.py work work\candidate.wav
-```
+### Tools
 
-The scripts in `tools\eloquence` measure how a Klatter rendering differs from a recording of another synthesizer reading the same text; the current tuning targets ETI-Eloquence. `segdump` lists our segments and their times, `asr_words.ps1` finds word times in the reference with Windows speech recognition, and `align.py` anchors runs of matching words and maps each of our segments onto the reference timeline. The analysis scripts then each take the work folder and an optional rendering: `vowels.py` and `cons.py` compare formants and band levels per phoneme, `stops.py` closure depth, `durs.py` and `classfit.py` durations, `vresid.py` vowel spectra, `vlevel.py` relative vowel loudness, and `bjump.py` how abruptly the spectrum changes at segment boundaries. They require Python with numpy; the reference recording is not included.
+| Tool | Purpose |
+|---|---|
+| `tools/listen.py` | Rate- and loudness-matched blind A/B listening tests between two engines, with replay and a recorded manifest. Adapters in `tools/tts_engines.py` also support SAPI voices, Eloquence (if installed) and eSpeak. |
+| `tools/voice_metrics.py` | Compares a rendering with a reference recording using rate-independent measures: pitch distribution, H1-H2, formants, pauses and spectral balance. |
+| `tools/eloquence/` | Aligns a Klatter rendering with a reference recording of the same text and compares formants, consonant levels, closures, durations and vowel spectra. |
+| `phones` | Prints the pronunciation Klatter chooses for each word (`cargo run --release --example phones < text.txt`). |
+| `segdump` | Prints the segment timeline: phones, stress, durations and targets (`cargo run --release --example segdump -- text.txt`). |
+| `lts_accuracy` | Measures letter-to-sound agreement with CMUdict (`cargo run --release --example lts_accuracy`). |
 
-When rendering with `segdump`'s optional scale and output arguments, the audio uses the same synthesis path and fixed gain as the CLI and screen-reader interface.
-
-## Pronunciation fallback
-
-Unknown mixed-case identifiers split at lower-to-upper and acronym-to-word
-boundaries (`getElementByID`, `XMLParser`). Existing whole-word dictionary
-readings and caller overrides take precedence. Each part uses the ordinary
-word, acronym and number rules; expansions retain the complete identifier's
-original UTF-8 range. Lowercase words, ordinary title case, all-caps words and
-apostrophe-containing words keep their existing behavior. This is pronunciation
-fallback, not screen-reader punctuation verbosity or symbol announcement.
-
-Pronunciation fallback folds common accented Latin letters to English lookup
-keys, including combining accents, while word events retain original UTF-8
-ranges. After exact readings and existing inflections, additional suffixes can
-reuse known stems with silent-E, consonant-doubling or I/Y repairs. A compound
-requires two known components of at least four letters and one unambiguous
-split, without a function-word head; its second component receives secondary
-stress. Unknown stems and ambiguous compounds retain the
-whole-word rules. No generic prefix stripping or connected-speech weak-form
-changes are applied.
-
-A known IZE reading can supply an otherwise unknown ISE spelling. Stress-bearing
-EER is not treated as an ordinary ER derivation.
-
-Accent folding is not multilingual pronunciation or homograph disambiguation:
-for example, accented and unaccented forms can share an English lookup key.
+The Rust diagnostics live in `tools` and are built as Cargo examples, so they are not part of the CLI, DLL or add-on. Reference recordings are not included.
 
 ## Known limitations
 
-- Pronunciation does not use sentence context to distinguish words such as present- and past-tense READ. Words absent from both dictionaries depend on morphology and letter-to-sound guesses.
-- There is no emphasis markup, and phrasing comes from punctuation only.
-- Transitions still occupy phoneme durations rather than independently timed acoustic units. Lexical stress and phrase prominence are not modeled separately.
-- The input must be English.
+- English only.
+- Pronunciation does not use sentence context, so homographs such as present- and past-tense *read* take one reading.
+- Phrasing comes from punctuation only, and there is no emphasis markup.
+- Transitions occupy phoneme durations rather than being independently timed units, as they are in Hertz's model.
+- Klatter has Eloquence-like qualities but not Eloquence's voice identity.
+
+## Licensing
+
+Klatter is licensed under the terms of the MIT license.
+
+The CMU Pronouncing Dictionary is distributed under its own BSD-style licence, in `data/cmudict/LICENSE.txt`, which must accompany binary distributions (the NVDA builder includes it).

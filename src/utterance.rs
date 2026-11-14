@@ -189,10 +189,21 @@ pub(crate) struct SegmentPlan {
 }
 
 pub(crate) fn build_plan(tokens: &[Token], overrides: &lexicon::Pronunciations) -> SegmentPlan {
+    build_plan_cancellable(tokens, overrides, &|| false).expect("uncancelled segment planning")
+}
+
+pub(crate) fn build_plan_cancellable(
+    tokens: &[Token],
+    overrides: &lexicon::Pronunciations,
+    cancelled: &impl Fn() -> bool,
+) -> Option<SegmentPlan> {
     let mut segs = vec![Seg::pause(None)];
     let mut marks = Vec::new();
     let mut words = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
+        if cancelled() {
+            return None;
+        }
         match token {
             Token::Mark(id) => {
                 let speech_started = segs.iter().any(|s| s.ph.is_some());
@@ -241,7 +252,11 @@ pub(crate) fn build_plan(tokens: &[Token], overrides: &lexicon::Pronunciations) 
         segs.push(Seg::pause(Some(Break::Period)));
     }
     mark_phrase_final(&mut segs);
-    SegmentPlan { segs, marks, words }
+    if cancelled() {
+        None
+    } else {
+        Some(SegmentPlan { segs, marks, words })
+    }
 }
 
 fn mark_phrase_final(segs: &mut [Seg]) {

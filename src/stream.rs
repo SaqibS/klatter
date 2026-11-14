@@ -129,14 +129,27 @@ impl Utterance {
                     tokens.push(text::Token::Mark(id));
                 }
                 Input::Text(source) => {
-                    text::append_with_spans(&source, &mut tokens, |token, range| {
-                        origins.push((token, item, range));
-                    });
+                    if !text::append_with_spans_cancellable(
+                        &source,
+                        &mut tokens,
+                        |token, range| {
+                            origins.push((token, item, range));
+                        },
+                        &|| self.cancel.is_cancelled(),
+                    ) {
+                        return;
+                    }
                 }
             }
         }
         text::end_utterance(&mut tokens);
-        let plan = crate::plan_tokens(&tokens, &self.voice, &self.pronunciations);
+        let Some(plan) =
+            crate::plan_tokens_cancellable(&tokens, &self.voice, &self.pronunciations, &|| {
+                self.cancel.is_cancelled()
+            })
+        else {
+            return;
+        };
         let mut origins = origins.into_iter().peekable();
         self.word_events = plan
             .words

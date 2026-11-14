@@ -206,25 +206,41 @@ fn plan_tokens(
     voice: &Voice,
     pronunciations: &Pronunciations,
 ) -> AcousticPlan {
+    plan_tokens_cancellable(tokens, voice, pronunciations, &|| false)
+        .expect("uncancelled acoustic planning")
+}
+
+fn plan_tokens_cancellable(
+    tokens: &[text::Token],
+    voice: &Voice,
+    pronunciations: &Pronunciations,
+    cancelled: &impl Fn() -> bool,
+) -> Option<AcousticPlan> {
     let utterance::SegmentPlan {
         mut segs,
         marks,
         words,
-    } = utterance::build_plan(tokens, pronunciations);
+    } = utterance::build_plan_cancellable(tokens, pronunciations, cancelled)?;
     if segs.iter().all(|s| s.ph.is_none()) {
-        return AcousticPlan {
+        return Some(AcousticPlan {
             frames: Vec::new(),
             marks: marks.into_iter().map(|(id, _)| (id, 0)).collect(),
             words: Vec::new(),
-        };
+        });
     }
     prosody::assign_durations(&mut segs);
     let scale = DEFAULT_WPM / voice.wpm;
     prosody::scale_durations(&mut segs, scale);
+    if cancelled() {
+        return None;
+    }
     let (starts, lens) = params::frame_layout(&segs);
-    let mut frames = params::build_frames_with_time_scale(&segs, &starts, &lens, scale);
+    let mut frames = params::build_frames_cancellable(&segs, &starts, &lens, scale, cancelled)?;
     let pitch_scale = voice.pitch_hz / prosody::BASE_F0;
     for f in &mut frames {
+        if cancelled() {
+            return None;
+        }
         // Written so the natural settings leave F0 bit-for-bit unchanged.
         let shaped = f.f0 * voice.inflection + prosody::BASE_F0 * (1.0 - voice.inflection);
         f.f0 = (shaped * pitch_scale).max(MIN_F0);
@@ -237,16 +253,39 @@ fn plan_tokens(
         .into_iter()
         .map(|(token, seg)| (token, starts[seg]))
         .collect();
-    AcousticPlan {
-        frames,
-        marks,
-        words,
+    if cancelled() {
+        None
+    } else {
+        Some(AcousticPlan {
+            frames,
+            marks,
+            words,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_acoustic_planning_returns_no_partial_plan() {
+        let tokens = text::normalize(&"Alice reads books ".repeat(30));
+        for limit in [1, 20, 500] {
+            let polls = std::cell::Cell::new(0);
+            let plan = plan_tokens_cancellable(
+                &tokens,
+                &Voice::default(),
+                &Pronunciations::default(),
+                &|| {
+                    polls.set(polls.get() + 1);
+                    polls.get() == limit
+                },
+            );
+            assert!(plan.is_none(), "cancellation at poll {limit}");
+            assert_eq!(polls.get(), limit);
+        }
+    }
 
     #[test]
     fn caller_overrides_are_isolated_and_leave_default_speech_unchanged() {

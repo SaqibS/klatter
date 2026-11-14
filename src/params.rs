@@ -217,7 +217,12 @@ pub fn frame_layout(segs: &[Seg]) -> (Vec<usize>, Vec<usize>) {
     (starts, lens)
 }
 
-fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formants> {
+fn formant_tracks(
+    segs: &[Seg],
+    starts: &[usize],
+    lens: &[usize],
+    cancelled: &impl Fn() -> bool,
+) -> Option<Vec<Formants>> {
     let n = segs.len();
     let windows = transition_windows(segs, lens);
     // Pauses and /h/ borrow formants from a neighbour so nothing jumps oddly.
@@ -231,6 +236,9 @@ fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formant
         .collect();
     let mut track: Vec<Formants> = Vec::new();
     for i in 0..n {
+        if cancelled() {
+            return None;
+        }
         let ph = resolved[i].unwrap_or(Ph::AX);
         // The offglide must finish before the outgoing transition can leave its target.
         let outgoing = if ph.spec().f_end.is_some() {
@@ -250,6 +258,9 @@ fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formant
     let target = track.clone();
 
     for (i, &(left_frames, right_frames)) in windows.iter().enumerate() {
+        if cancelled() {
+            return None;
+        }
         let boundary = starts[i + 1];
         let a = boundary - left_frames;
         let b = boundary + right_frames;
@@ -267,7 +278,7 @@ fn formant_tracks(segs: &[Seg], starts: &[usize], lens: &[usize]) -> Vec<Formant
             };
         }
     }
-    track
+    Some(track)
 }
 
 fn release_frames(ph: Ph) -> usize {
@@ -361,10 +372,21 @@ pub(crate) fn build_frames_with_time_scale(
     lens: &[usize],
     time_scale: f64,
 ) -> Vec<Frame> {
+    build_frames_cancellable(segs, starts, lens, time_scale, &|| false)
+        .expect("uncancelled frame planning")
+}
+
+pub(crate) fn build_frames_cancellable(
+    segs: &[Seg],
+    starts: &[usize],
+    lens: &[usize],
+    time_scale: f64,
+    cancelled: &impl Fn() -> bool,
+) -> Option<Vec<Frame>> {
     assert_eq!(segs.len(), starts.len());
     assert_eq!(segs.len(), lens.len());
-    let formants = formant_tracks(segs, starts, lens);
-    let f0 = prosody::f0_contour_with_time_scale(segs, starts, lens, FRAME_MS, time_scale);
+    let formants = formant_tracks(segs, starts, lens, cancelled)?;
+    let f0 = prosody::f0_contour_cancellable(segs, starts, lens, FRAME_MS, time_scale, cancelled)?;
     let mut frames: Vec<Frame> = (0..formants.len())
         .map(|k| Frame {
             f0: f0[k],
@@ -375,6 +397,9 @@ pub(crate) fn build_frames_with_time_scale(
         .collect();
 
     for i in 0..segs.len() {
+        if cancelled() {
+            return None;
+        }
         let Some(ph) = segs[i].ph else { continue };
         let spec = ph.spec();
         let range = starts[i]..starts[i] + lens[i];
@@ -430,10 +455,16 @@ pub(crate) fn build_frames_with_time_scale(
 
     cross_fade(segs, starts, lens, &mut frames);
     nasalize_vowels(segs, starts, lens, &mut frames);
+    if cancelled() {
+        return None;
+    }
 
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
     for i in 0..segs.len().saturating_sub(1) {
+        if cancelled() {
+            return None;
+        }
         let n = aspiration_frames(segs, i, lens[i + 1]);
         for fr in &mut frames[starts[i + 1]..starts[i + 1] + n] {
             fr.av = 0.0;
@@ -443,6 +474,9 @@ pub(crate) fn build_frames_with_time_scale(
     }
 
     for i in 0..segs.len() {
+        if cancelled() {
+            return None;
+        }
         if !segs[i].ph.is_some_and(Ph::is_sonorant) {
             continue;
         }
@@ -455,6 +489,9 @@ pub(crate) fn build_frames_with_time_scale(
     }
     let half = CROSS_FADE_FRAMES / 2;
     for i in 0..segs.len() {
+        if cancelled() {
+            return None;
+        }
         if segs[i].ph.is_some() {
             continue;
         }
@@ -482,7 +519,7 @@ pub(crate) fn build_frames_with_time_scale(
             fr.fnz = last.fnz;
         }
     }
-    frames
+    if cancelled() { None } else { Some(frames) }
 }
 
 /// Separates the nasal pole-zero pair over the end of a vowel before a nasal

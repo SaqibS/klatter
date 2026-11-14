@@ -69,14 +69,21 @@ reads return 1 for output/events, 0 for EOF, -2 for cancellation, and -1 for inv
 input/failure. An empty output buffer does not advance the utterance.
 
 Pull rendering preserves whole-utterance acoustic planning and exact PCM,
-independently of buffer size. Cancellation is checked per emitted sample and around planning,
-but cannot interrupt an acoustic plan in progress. Source text and overrides
+independently of buffer size. Cancellation is checked per emitted sample and
+during normalization, pronunciation and acoustic planning, including each pitch
+frame. Individual lookups, allocations and some processing passes are not
+preemptible. Source text and overrides
 are copied upfront; creating an utterance does no acoustic planning until its
 first nonempty read.
 
 ### NVDA add-on
 
 `nvda/addon` holds an NVDA synthesizer driver that loads `klatter.dll` with ctypes. It supports rate, pitch, inflection and volume, index marks and mid-utterance pitch changes; NVDA's 0-100 settings map onto `KlatterVoice`, with 50 giving Klatter's natural voice and each 50 steps doubling or halving the rate or pitch. NVDA is a 64-bit x86 program, so the add-on carries an x64 DLL, which runs under emulation on ARM64 Windows.
+
+The worker pulls PCM through the cancellable C API. NVDA cancellation signals
+the active native utterance as well as stopping playback and clearing queued
+requests. Stale requests are rejected before planning or feeding audio; index
+notifications remain tied to playback completion of their preceding audio.
 
 ```
 rustup target add x86_64-pc-windows-msvc

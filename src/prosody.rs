@@ -275,11 +275,26 @@ pub(crate) fn f0_contour_with_time_scale(
     frame_ms: f64,
     time_scale: f64,
 ) -> Vec<f64> {
+    f0_contour_cancellable(segs, starts, lens, frame_ms, time_scale, &|| false)
+        .expect("uncancelled pitch planning")
+}
+
+pub(crate) fn f0_contour_cancellable(
+    segs: &[Seg],
+    starts: &[usize],
+    lens: &[usize],
+    frame_ms: f64,
+    time_scale: f64,
+    cancelled: &impl Fn() -> bool,
+) -> Option<Vec<f64>> {
     let total: usize = lens.iter().sum();
     let mut f0 = vec![BASE_F0; total];
     let mut i = 0;
     let mut sentence_start = 0usize;
     while i < segs.len() {
+        if cancelled() {
+            return None;
+        }
         if segs[i].ph.is_none() {
             if matches!(
                 segs[i].brk,
@@ -306,7 +321,8 @@ pub(crate) fn f0_contour_with_time_scale(
             sentence_start,
             frame_ms / time_scale,
             &mut f0,
-        );
+            cancelled,
+        )?;
         // Silent-frame pitch must not flatten the clause's boundary tone.
         let begin = starts[clause_begin];
         let end = starts[i - 1] + lens[i - 1];
@@ -314,7 +330,7 @@ pub(crate) fn f0_contour_with_time_scale(
     }
     add_microprosody(segs, starts, lens, frame_ms, &mut f0);
     add_flutter(&mut f0, frame_ms);
-    f0
+    if cancelled() { None } else { Some(f0) }
 }
 
 /// Consonants perturb the F0 of the sonorant after them: a voiceless one
@@ -340,6 +356,7 @@ fn add_microprosody(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f6
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn clause_contour(
     segs: &[Seg],
     starts: &[usize],
@@ -348,7 +365,8 @@ fn clause_contour(
     sentence_start: usize,
     natural_frame_ms: f64,
     f0: &mut [f64],
-) {
+    cancelled: &impl Fn() -> bool,
+) -> Option<()> {
     let begin = starts[0];
     let end = starts[segs.len() - 1] + lens[segs.len() - 1];
     let accents: Vec<usize> = (0..segs.len())
@@ -368,6 +386,9 @@ fn clause_contour(
     let fall = ACCENT_FALL_MS / natural_frame_ms;
     let ease = |x: f64| 0.5 - 0.5 * (std::f64::consts::PI * x.clamp(0.0, 1.0)).cos();
     for frame in begin..end {
+        if cancelled() {
+            return None;
+        }
         // Taking the maximum prevents adjacent accents from forming a plateau.
         let bump = accents.iter().enumerate().fold(0.0f64, |m, (n, &k)| {
             let peak = peak_of(k) as f64;
@@ -416,6 +437,7 @@ fn clause_contour(
             }
         };
     }
+    Some(())
 }
 
 fn smooth(f0: &mut [f64], width: usize) {
@@ -445,6 +467,20 @@ mod tests {
     use super::*;
     use crate::text::normalize;
     use crate::utterance::build;
+
+    #[test]
+    fn pitch_planning_can_stop_inside_a_single_clause() {
+        let mut segs = build(&normalize(&"Alice reads books ".repeat(30)));
+        assign_durations(&mut segs);
+        let (starts, lens) = crate::params::frame_layout(&segs);
+        let polls = std::cell::Cell::new(0);
+        let result = f0_contour_cancellable(&segs, &starts, &lens, 5.0, 1.0, &|| {
+            polls.set(polls.get() + 1);
+            polls.get() == 10
+        });
+        assert!(result.is_none());
+        assert_eq!(polls.get(), 10);
+    }
 
     fn durations(text: &str) -> Vec<(Ph, f64)> {
         let mut segs = build(&normalize(text));
@@ -582,7 +618,17 @@ mod tests {
         let lens = vec![40; segs.len()];
         let starts: Vec<usize> = (0..segs.len()).map(|i| i * 40).collect();
         let mut natural = vec![0.0; lens.iter().sum()];
-        clause_contour(&segs, &starts, &lens, Break::Period, 0, 5.0, &mut natural);
+        clause_contour(
+            &segs,
+            &starts,
+            &lens,
+            Break::Period,
+            0,
+            5.0,
+            &mut natural,
+            &|| false,
+        )
+        .unwrap();
         let accents: Vec<usize> = (0..segs.len())
             .filter(|&i| segs[i].is_vowel() && segs[i].stress == 1 && !segs[i].function_word)
             .collect();
@@ -606,7 +652,9 @@ mod tests {
             0,
             10.0,
             &mut fast,
-        );
+            &|| false,
+        )
+        .unwrap();
         // Boundary tones inherit the preceding sample; compare the accent portion.
         for (i, &f0) in fast.iter().take(peaks[2] / 2).enumerate() {
             assert!((f0 - natural[2 * i]).abs() < 1e-9, "frame {i}");

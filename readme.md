@@ -138,6 +138,10 @@ measures raw letter-to-sound agreement against first CMUdict readings, without
 morphology or stress scoring. This is a diagnostic, not a listening-quality
 score or an estimate of real unknown-word accuracy.
 
+The Rust diagnostics (`phones`, `lts_accuracy` and `segdump`) live in `tools`
+with the Python tools. Cargo builds them as examples, so they are not part of
+the CLI, DLL or NVDA add-on.
+
 ## Voice metrics
 
 ```

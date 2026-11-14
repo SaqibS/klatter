@@ -3,7 +3,7 @@
 Every script works on a WORKDIR holding:
   reference.wav        Eloquence reading of the text
   words.tsv            SAPI word timings of reference.wav (asr_words.ps1)
-  segs.tsv             our segment dump for the same text (examples/segdump.rs)
+  segs.tsv             our segment dump for the same text (tools/segdump.rs)
   align.tsv            segs.tsv plus eloq_start/eloq_end columns (align.py)
   anchored_words.tsv   word anchors used by align.py (written by align.py)
 and an optional candidate WAV (our rendering), defaulting to WORKDIR/candidate.wav.

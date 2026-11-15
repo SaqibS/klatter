@@ -82,11 +82,23 @@ fn ms(x: f64) -> usize {
 const RELEASE_AFTER_FRICATIVE_MS: f64 = 30.0;
 const RELEASE_AFTER_ASPIRATION_MS: f64 = 70.0;
 const CLOSURE_AFTER_OFFGLIDE_MS: f64 = 15.0;
-const DIPHTHONG_GLIDE_MS: f64 = 80.0;
-/// The AY and AW glide finishes about 70% of the way through the
-/// vowel and holds the end quality, rather than gliding until the last moment.
-const DIPHTHONG_OFFGLIDE_MS: f64 = 50.0;
-const MIN_ONSET_MS: f64 = 30.0;
+/// AY, AW and OY timing, with vowels measured from voicing onset to
+/// acoustic offset: the glide
+/// takes about 55 ms and reaches the offglide just before the consonant, and
+/// the onset vowel takes the rest (at least 30% of the vowel after the
+/// incoming transition). A long held offglide closes them early and leaves
+/// the open onset barely heard.
+const DIPHTHONG_GLIDE_MS: f64 = 55.0;
+const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
+const MIN_ONSET: f64 = 0.3;
+/// Glide (start, end) as fractions of a diphthong before a voiceless
+/// obstruent, where diphthongs are short and glide early.
+const CLIPPED_GLIDE: (f64, f64) = (0.25, 0.8);
+/// Formant transitions into and out of a flap, before `TRANSITION_SCALE`. A
+/// tap is a single ballistic flick of the tongue tip (Ladefoged & Maddieson
+/// 1996, ch. 7), so the vowels around it move only briefly:
+/// a flap interrupts them for about 35-40 ms in all.
+const FLAP_TRANSITION_MS: f64 = 20.0;
 /// Transitions take about half the time these rules give;
 /// with short, evenly timed vowels, full-length transitions leave vowels
 /// drifting toward their neighbours instead of holding their quality.
@@ -161,7 +173,16 @@ fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
 
 fn transition_windows(segs: &[Seg], lens: &[usize]) -> Vec<(usize, usize)> {
     let mut windows: Vec<(usize, usize)> = (0..segs.len().saturating_sub(1))
-        .map(|i| transition_window(segs, i).unwrap_or((0, 0)))
+        .map(|i| {
+            let (before, after) = transition_window(segs, i).unwrap_or((0, 0));
+            if segs[i].flap || segs[i + 1].flap {
+                // The tongue tip strikes and leaves the ridge in one ballistic movement.
+                let tap = ms(FLAP_TRANSITION_MS);
+                (before.min(tap), after.min(tap))
+            } else {
+                (before, after)
+            }
+        })
         .map(|(before, after)| (scale_transition(before), scale_transition(after)))
         .collect();
     for i in 0..segs.len() {
@@ -200,20 +221,33 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 
-/// Per-frame formant targets of a segment, before coarticulation.
-fn targets(ph: Ph, len: usize) -> Vec<Formants> {
+/// Per-frame formant targets of a segment, before coarticulation. `incoming`
+/// frames at its start are covered by the transition from the segment
+/// before, and `clipped` marks a vowel before a voiceless obstruent.
+fn targets(ph: Ph, len: usize, incoming: usize, clipped: bool) -> Vec<Formants> {
     let spec = ph.spec();
     let frames = |ms: f64| ms / FRAME_MS;
-    // Hertz, Younes & Zinovieva (1999): AY, AW and OY are vowel plus glide, with
-    // a fixed glide transition and an offglide hold; the onset vowel takes the
-    // rest. Short ones and the one-phone diphthongs scale proportionally.
-    let fixed = matches!(ph, Ph::AY | Ph::AW | Ph::OY)
-        && len as f64 >= frames(DIPHTHONG_GLIDE_MS + DIPHTHONG_OFFGLIDE_MS + MIN_ONSET_MS);
-    let (glide_start, glide_len) = if fixed {
-        let glide = frames(DIPHTHONG_GLIDE_MS);
-        (len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide, glide)
-    } else {
-        (0.25 * len as f64, 0.6 * len as f64)
+    // Hertz, Younes & Zinovieva (1999): AY, AW and OY are vowel plus glide.
+    // The vowel holds its onset from the end of the transition into it
+    // and glides in a roughly fixed time just before the next consonant, so
+    // the open onset of "time" or "down" is heard. Before a voiceless
+    // obstruent the whole vowel is clipped and it glides from early on.
+    // EY and OW glide throughout.
+    let settled = incoming.min(len / 2) as f64;
+    let span = len as f64 - settled;
+    let (glide_start, glide_len) = match ph {
+        Ph::AY | Ph::AW | Ph::OY if clipped => (
+            CLIPPED_GLIDE.0 * len as f64,
+            (CLIPPED_GLIDE.1 - CLIPPED_GLIDE.0) * len as f64,
+        ),
+        Ph::AY | Ph::AW | Ph::OY
+            if span >= frames(DIPHTHONG_GLIDE_MS + DIPHTHONG_OFFGLIDE_MS) + MIN_ONSET * span =>
+        {
+            let glide = frames(DIPHTHONG_GLIDE_MS);
+            (len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide, glide)
+        }
+        Ph::AY | Ph::AW | Ph::OY => (settled + MIN_ONSET * span, 0.6 * span),
+        _ => (0.25 * len as f64, 0.6 * len as f64),
     };
     (0..len)
         .map(|k| match spec.f_end {
@@ -262,6 +296,8 @@ fn formant_tracks(
             Some(Ph::HH) | None => (i + 1..n)
                 .chain((0..i).rev())
                 .find_map(|j| segs[j].ph.filter(|p| *p != Ph::HH)),
+            // Both flaps are voiced taps with /d/'s low F1.
+            Some(Ph::T) if segs[i].flap => Some(Ph::D),
             p => p,
         })
         .collect();
@@ -277,7 +313,12 @@ fn formant_tracks(
         } else {
             0
         };
-        let mut t = targets(ph, lens[i] - outgoing);
+        let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
+        let clipped = segs
+            .get(i + 1)
+            .and_then(|s| s.ph)
+            .is_some_and(|p| is_obstruent(p) && !p.is_voiced());
+        let mut t = targets(ph, lens[i] - outgoing, incoming, clipped);
         t.resize(lens[i], *t.last().unwrap());
         if let Some(f2) = velar_f2_locus(segs, i) {
             for f in &mut t {
@@ -333,8 +374,8 @@ fn aspiration_frames(segs: &[Seg], i: usize, next_len: usize) -> usize {
     ms(segs[i + 1].aspiration_ms).min(next_len.saturating_sub(1))
 }
 
-fn is_voiceless(p: Option<Ph>) -> bool {
-    p.is_some_and(|p| !p.is_voiced())
+fn is_voiceless(s: Option<&Seg>) -> bool {
+    s.is_some_and(|s| s.ph.is_some_and(|p| !p.is_voiced()) && !s.flap)
 }
 
 /// Per-frame (breathiness, offset) for a sonorant: breathiness 0 is modal and
@@ -344,8 +385,8 @@ fn is_voiceless(p: Option<Ph>) -> bool {
 /// sentence-final syllables.
 fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64, f64)> {
     let s = &segs[i];
-    let prev = if i > 0 { segs[i - 1].ph } else { None };
-    let next = segs.get(i + 1).and_then(|n| n.ph);
+    let prev = i.checked_sub(1).map(|j| &segs[j]);
+    let next = segs.get(i + 1);
     let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
     let mut floor: f64 = 0.0;
@@ -461,6 +502,13 @@ pub(crate) fn build_frames_cancellable(
                 for fr in &mut frames[range] {
                     fr.av = HH_AV_DB;
                     fr.ah = HH_AH_DB;
+                }
+            }
+            Class::Stop if segs[i].flap => {
+                // A tap is too brief to stop voicing and has no release
+                // burst; voicing only drops to the level of a voiced closure.
+                for fr in &mut frames[range] {
+                    fr.av = VOICE_BAR_DB;
                 }
             }
             Class::Stop | Class::Affricate => {
@@ -763,6 +811,19 @@ mod tests {
     }
 
     #[test]
+    fn flap_stays_voiced_without_burst_and_is_shorter_than_a_stop() {
+        let (segs, starts, lens, frames) = frames_for("water");
+        let flap = segs.iter().position(|s| s.flap).unwrap();
+        let tap = &frames[starts[flap]..starts[flap] + lens[flap]];
+        assert!(tap.iter().all(|f| f.av > 0.0 && f.af == 0.0 && f.ab == 0.0));
+        let vowel = &frames[starts[flap + 1]];
+        assert!(vowel.av > 0.0, "no aspiration after a flap");
+        let (stop_segs, _, stop_lens, _) = frames_for("button");
+        let stop = stop_segs.iter().position(|s| s.ph == Some(Ph::T)).unwrap();
+        assert!(lens[flap] * 2 <= stop_lens[stop]);
+    }
+
+    #[test]
     fn aspiration_matches_the_prosodic_budget() {
         for text in ["tea", "tree", "try", "quick", "to be", "key", "stay", "dee"] {
             let (segs, starts, lens, frames) = frames_for(text);
@@ -898,8 +959,8 @@ mod tests {
     }
 
     #[test]
-    fn diphthongs_reach_and_hold_offglides_before_closure() {
-        for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("voice", Ph::OY)] {
+    fn diphthongs_hold_their_onset_then_glide_just_before_closure() {
+        for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("noise", Ph::OY)] {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
             let closure =
@@ -908,7 +969,12 @@ mod tests {
             let glide = offglide - ms(DIPHTHONG_GLIDE_MS);
             let spec = ph.spec();
             let target = spec.f_end.unwrap();
-            assert_eq!(frames[glide].f, spec.f, "{text}");
+            // The onset is held from the end of the incoming transition.
+            let settled = starts[vowel] + transition_windows(&segs, &lens)[vowel - 1].1;
+            assert!(glide > settled + (closure - settled) / 4, "{text}");
+            for fr in &frames[settled..=glide] {
+                assert_eq!(fr.f, spec.f, "{text}");
+            }
             for (k, fr) in frames[glide..offglide].iter().enumerate() {
                 let expected: [f64; 3] = std::array::from_fn(|j| {
                     lerp(
@@ -924,6 +990,20 @@ mod tests {
             }
             assert_ne!(frames[closure].f, target, "{text}");
         }
+    }
+
+    #[test]
+    fn diphthongs_glide_early_before_voiceless_obstruents() {
+        let onset_share = |text: &str| {
+            let (segs, starts, lens, frames) = frames_for(text);
+            let vowel = segs.iter().position(|s| s.ph == Some(Ph::AY)).unwrap();
+            let onset = frames[starts[vowel]..starts[vowel] + lens[vowel]]
+                .iter()
+                .filter(|f| f.f == Ph::AY.spec().f)
+                .count();
+            onset as f64 / lens[vowel] as f64
+        };
+        assert!(onset_share("rice") < onset_share("rise"));
     }
 
     #[test]

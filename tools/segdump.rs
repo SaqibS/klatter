@@ -2,7 +2,8 @@
 //!
 //! Columns: ph, stress, fn (function word), final (phrase-final), start_ms,
 //! dur_ms (frame-quantized, as rendered), f1-f3 (table targets), wi (word
-//! initial), word (the word spelled out on its first phone).
+//! initial), flap (1 for a /t/ or /d/ spoken as a flap), word (the word
+//! spelled out on its first phone).
 //!
 //! Usage:
 //!   cargo run --release --example segdump -- text.txt > segs.tsv
@@ -62,7 +63,7 @@ fn run(input: &str, render: Option<(f64, &str)>) -> io::Result<()> {
     let mut out = BufWriter::new(io::stdout().lock());
     writeln!(
         out,
-        "ph\tstress\tfn\tfinal\tstart_ms\tdur_ms\tf1\tf2\tf3\twi\tword"
+        "ph\tstress\tfn\tfinal\tstart_ms\tdur_ms\tf1\tf2\tf3\twi\tflap\tword"
     )?;
     for (i, seg) in segs.iter().enumerate() {
         let (name, f) = match seg.ph {
@@ -76,7 +77,7 @@ fn run(input: &str, render: Option<(f64, &str)>) -> io::Result<()> {
         };
         writeln!(
             out,
-            "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{word}",
+            "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{word}",
             seg.stress,
             seg.function_word as u8,
             seg.phrase_final as u8,
@@ -86,6 +87,7 @@ fn run(input: &str, render: Option<(f64, &str)>) -> io::Result<()> {
             f[1],
             f[2],
             seg.word_initial as u8,
+            seg.flap as u8,
         )?;
     }
     out.flush()

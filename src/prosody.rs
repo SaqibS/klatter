@@ -80,7 +80,7 @@ pub fn aspiration_ms(segs: &[Seg], i: usize) -> f64 {
     else {
         return 0.0;
     };
-    if !ph.is_plosive() || ph.is_voiced() || after_s {
+    if !ph.is_plosive() || ph.is_voiced() || after_s || s.flap {
         return 0.0;
     }
     let ms = if next.stress > 0 && !next.function_word {
@@ -101,9 +101,12 @@ const VOWEL_SHORTENING_AFTER_ASPIRATION_MS: f64 = 20.0;
 
 /// Syllables are kept evenly timed: stressed vowels are shorter than
 /// Klatt's rules give, which avoids a drawl on content words, while unstressed
-/// syllables of content words stay audible instead of being swallowed.
+/// syllables of content words stay audible instead of being swallowed. A
+/// word's last syllable already escapes non-word-final shortening and gets the
+/// word-final postvocalic lengthening, so it needs less help.
 const STRESSED_VOWEL_FACTOR: f64 = 0.65;
 const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.8;
+const UNSTRESSED_WORD_FINAL_VOWEL_FACTOR: f64 = 1.5;
 
 /// Closures stay short, while fricatives need time to carry their noise cue.
 const STOP_FACTOR: f64 = 0.8;
@@ -114,6 +117,10 @@ const AFFRICATE_FACTOR: f64 = 1.2;
 /// Klatt's value is 1.4, but final vowels already escape non-final shortening
 /// and get the full postvocalic effect, so they need trimming to avoid a drawl.
 const PHRASE_FINAL_LENGTHENING: f64 = 0.8;
+
+/// Inherent and minimum durations (ms) of a flapped /t/ or /d/: a single tap,
+/// much shorter than a stop closure (Zue & Laferriere 1979).
+const FLAP_DURATIONS: (f64, f64) = (25.0, 15.0);
 
 pub fn assign_durations(segs: &mut [Seg]) {
     let last = segs.len().saturating_sub(1);
@@ -126,7 +133,11 @@ pub fn assign_durations(segs: &mut [Seg]) {
             continue;
         };
         let s = &segs[i];
-        let (inh, mut min) = ph.durations();
+        let (inh, mut min) = if s.flap {
+            FLAP_DURATIONS
+        } else {
+            ph.durations()
+        };
         let mut prcnt = 1.0;
         let vowel = ph.is_vowel();
         let stressed = s.stress > 0 && !s.function_word;
@@ -167,9 +178,18 @@ pub fn assign_durations(segs: &mut [Seg]) {
             } else {
                 0.7
             };
-            // Phrase-final syllables are already lengthened, so they need no extra audibility.
-            if vowel && !s.function_word && !s.phrase_final {
-                prcnt *= UNSTRESSED_CONTENT_VOWEL_FACTOR;
+            // Phrase-final syllables are already lengthened, so they need no
+            // extra audibility, and nor does a schwa before a syllabic /l/
+            // ("little", "table"), whose /l/ carries the syllable.
+            let syllabic_l = ph == Ph::AX
+                && next == Some(Ph::L)
+                && segs.get(i + 1).is_some_and(|l| l.word_final);
+            if vowel && !s.function_word && !s.phrase_final && !syllabic_l {
+                prcnt *= if s.syllable + 1 < s.syllables_in_word {
+                    UNSTRESSED_CONTENT_VOWEL_FACTOR
+                } else {
+                    UNSTRESSED_WORD_FINAL_VOWEL_FACTOR
+                };
             }
         }
         if vowel && stressed {
@@ -350,7 +370,11 @@ fn add_microprosody(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f6
         if !v.is_sonorant() || p.is_sonorant() {
             continue;
         }
-        let shift = if p.is_voiced() { -LOWER } else { RAISE };
+        let shift = if p.is_voiced() || segs[i - 1].flap {
+            -LOWER
+        } else {
+            RAISE
+        };
         for k in 0..decay.min(lens[i]) {
             f0[starts[i] + k] *= 1.0 + shift * (1.0 - k as f64 / decay as f64);
         }

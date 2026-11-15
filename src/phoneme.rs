@@ -263,26 +263,29 @@ impl Ph {
         self.class() == Class::Stop
     }
 
-    /// Klatt (1979) inherent and minimum durations in ms.
+    /// Klatt (1979) inherent and minimum durations in ms, with vowels spread
+    /// less by quality than in Klatt's table: AA, AO, AY and UH are shorter
+    /// and IY, IH and EY longer (both durations scaled together, so
+    /// stress and context still compress them as Klatt's rules intend).
     pub fn durations(self) -> (f64, f64) {
         use Ph::*;
         match self {
-            AA => (240.0, 100.0),
+            AA => (180.0, 75.0),
             AE => (230.0, 80.0),
             AH => (140.0, 60.0),
-            AO => (240.0, 100.0),
+            AO => (195.0, 80.0),
             AW => (260.0, 100.0),
             AX => (120.0, 60.0),
-            AY => (250.0, 150.0),
+            AY => (200.0, 120.0),
             EH => (150.0, 70.0),
             ER => (180.0, 80.0),
-            EY => (190.0, 70.0),
-            IH => (135.0, 40.0),
+            EY => (225.0, 85.0),
+            IH => (145.0, 45.0),
             IX => (110.0, 40.0),
-            IY => (155.0, 55.0),
+            IY => (180.0, 65.0),
             OW => (220.0, 80.0),
             OY => (280.0, 150.0),
-            UH => (160.0, 60.0),
+            UH => (135.0, 50.0),
             UW => (210.0, 70.0),
             B => (85.0, 60.0),
             CH => (70.0, 50.0),
@@ -348,8 +351,11 @@ impl Ph {
                 65.0,
             ),
             AH => sp([590.0, 1300.0, 2510.0], [120.0, 105.0, 120.0], 60.5),
-            AX => sp([500.0, 1400.0, 2450.0], [140.0, 90.0, 150.0], 61.0),
-            IX => sp([420.0, 1680.0, 2450.0], [105.0, 90.0, 150.0], 61.0),
+            // The reduced vowels never occur sustained, so they are set for
+            // running speech: [ə] (AX) and the higher, central [ɨ]
+            // (IX).
+            AX => sp([480.0, 1250.0, 2420.0], [140.0, 90.0, 150.0], 61.0),
+            IX => sp([410.0, 1460.0, 2540.0], [105.0, 90.0, 150.0], 61.0),
             ER => sp([425.0, 1185.0, 1690.0], [95.0, 110.0, 275.0], 58.5),
             AY => dip(
                 [740.0, 1245.0, 2460.0],

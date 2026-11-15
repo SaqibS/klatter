@@ -79,11 +79,15 @@ Functions return null or a negative status for invalid input and never unwind a 
 | Paper | Used for |
 |---|---|
 | [Klatt (1980), *Software for a cascade/parallel formant synthesizer*](https://www.fon.hum.uva.nl/david/ma_ssp/2009/klatt-1980-JAS000971.pdf) | The cascade/parallel synthesizer structure, resonator and antiresonator equations, the parameter set, and vowel and consonant formant targets. |
-| [Klatt (1987), *Review of text-to-speech conversion for English*](https://sail.usc.edu/~lgoldste/Ling582/Week%2013/Klatt1987.pdf) | Segment duration rules (the `MIN + (INH - MIN) x PRCNT` model), locus theory, aspiration and voice onset time, phrase-final lengthening, and intonation. The numeric inherent and minimum durations are Klatt's (1979) values as summarized there. |
+| [Klatt (1987), *Review of text-to-speech conversion for English*](https://sail.usc.edu/~lgoldste/Ling582/Week%2013/Klatt1987.pdf) | Segment duration rules (the `MIN + (INH - MIN) x PRCNT` model), locus theory, aspiration and voice onset time, phrase-final lengthening, and intonation. The numeric inherent and minimum durations are Klatt's (1979) values as summarized there, except for some vowels (see below). |
 | [Klatt & Klatt (1990), *Analysis, synthesis, and perception of voice quality variations among female and male talkers*](https://www.fon.hum.uva.nl/david/ma_ssp/doc/Klatt-1990-JAS000820.pdf) | The KLSYN88 synthesizer and its KLGLOTT88 voicing source: open quotient, spectral tilt, flutter, double pulsing, open-phase F1 changes, and breathy phonation toward voiceless consonants and silence. |
 | [Hertz, Kadin & Karplus (1985), *The Delta rule development system for speech synthesis from text*](https://users.soe.ucsc.edu/~karplus/papers/delta-85.pdf) | Representing speech as coordinated streams, and splitting words into roots and suffixes before letter-to-sound conversion. |
 | [Hertz & Huffman (1992), *A nucleus-based timing model applied to multi-dialect speech synthesis by rule*](https://www.isca-archive.org/icslp_1992/hertz92_icslp.pdf) | Timing a vowel and its following liquids and glides as one nucleus, and shortening the voiced vowel after aspiration. |
 | [Hertz, Younes & Zinovieva (1999), *Language-universal and language-specific components in the multi-language ETI-Eloquence text-to-speech system*](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf) | Phones joined by explicit transitions, example transition timings, diphthong glide timing, and accent-peak placement. This is the published description of Eloquence's own design. |
+| Ladefoged & Johnson (2011), *A Course in Phonetics*, 6th ed. | American English connected speech: weak forms of function words, and flapping of /t/ and /d/ between a vowel and an unstressed vowel. |
+| Zue & Laferriere (1979), *Acoustic study of medial /t,d/ in American English*, JASA 66(4), 1039-1050 | Flaps as brief voiced taps without a release burst. |
+| Ladefoged & Maddieson (1996), *The Sounds of the World's Languages* | Taps and flaps as a single ballistic movement of the tongue tip. |
+| Flemming & Johnson (2007), *Rosa's roses: reduced vowels in American English*, JIPA 37(1), 83-96 | Two reduced vowels: a high central [ɨ] between consonants and [ə] elsewhere. |
 
 Modern neural and hybrid formant research ([KLATTSTAT, 2010](https://www.isca-archive.org/ssw_2010/anumanchipalli10b_ssw.pdf); [speaker-independent neural formant synthesis, 2023](https://arxiv.org/abs/2306.01957); [HiFi-Glot](https://arxiv.org/abs/2409.14823); [ARIS](https://arxiv.org/abs/2609.29923)) was read as background. It was not adopted: learned models trade determinism, latency and behaviour at extreme speaking rates for naturalness, and screen-reader users depend on the former.
 
@@ -91,9 +95,11 @@ Modern neural and hybrid formant research ([KLATTSTAT, 2010](https://www.isca-ar
 
 Some values are not taken from the papers. They are deliberate and documented in the code:
 
-- **Even rhythm.** Stressed vowels are shorter and unstressed vowels in content words longer than Klatt's rules give, for evenly timed syllables (except in phrase-final syllables, which are already lengthened).
+- **Even rhythm.** Stressed vowels are shorter and unstressed vowels in content words longer than Klatt's rules give, for evenly timed syllables (except in phrase-final syllables, which are already lengthened; unstressed vowels in a word's last syllable get less extra length, and a schwa before a syllabic /l/ none). Vowels are also spread less by quality than in Klatt's table, so AA, AO, AY and UH are shorter and IY, IH and EY longer.
+- **Diphthong timing.** AY, AW and OY hold their open onset from the end of the transition into them and glide in about 55 ms just before the next consonant; before a voiceless obstruent they glide from a quarter of the way through.
 - **Faster transitions.** Formant transitions take about half the durations of Hertz's published examples, so that short vowels reach their targets instead of drifting toward their neighbours.
-- **Vowel and nasal targets.** Vowel formants and bandwidths, nasal formants and relative loudness are tuned rather than taken from the papers.
+- **Vowel and nasal targets.** Vowel formants and bandwidths, nasal formants and relative loudness are tuned rather than taken from the papers. The two reduced vowels never occur sustained, so they are tuned for running speech.
+- **Flaps.** Transitions into and out of a flap are capped at 20 ms, so it interrupts the vowels only briefly.
 - **Velar loci.** /k/ and /g/ take their F2 locus from the neighbouring vowel, following a locus equation.
 - **Brighter voicing.** A gentle presence boost on voicing only, and fixed upper formants placed to keep energy at 3.5-5 kHz, give Klatter more high-frequency clarity.
 
@@ -101,9 +107,9 @@ Some values are not taken from the papers. They are deliberate and documented in
 
 1. **Text** (`text.rs`) expands numbers, abbreviations, acronyms and identifiers, folds accents, and splits clauses at punctuation, keeping each word's original UTF-8 position.
 2. **Pronunciation** (`lexicon.rs`, `morph.rs`, `lts.rs`) tries caller overrides, a small built-in table, then CMUdict. Unknown words go through suffix analysis, conservative compound splitting, and finally letter-to-sound rules with stress heuristics.
-3. **Structure** (`utterance.rs`) syllabifies words and marks function words and phrase-final syllables.
+3. **Structure** (`utterance.rs`) syllabifies words, marks function words and phrase-final syllables, and applies American connected-speech forms. Function words take weak forms ("to" [tə], "for" [fɚ]) when another word follows in the phrase, and keep their strong forms when spoken alone or at the end of a phrase ("what is it for?"). Unstressed vowels reduce to [ɨ] between consonants ("rabbit") and to [ə] elsewhere ("about", "little"), except in "-ing". /t/ and /d/ flap after a vowel or /r/, before an unstressed vowel in the word ("water") or any vowel across a word boundary in the phrase ("get up"). Caller overrides keep their vowels as written; flapping applies to them too. A listener heard Klatter without these forms as Scottish- or Irish-accented.
 4. **Prosody** (`prosody.rs`) applies the duration rules, nucleus timing and aspiration, then builds the pitch contour: a hat pattern with declination, accent peaks about three quarters of the way through the nucleus, boundary tones for statements, questions and commas, and consonant microprosody. Pauses are 165 ms at commas and 385 ms at sentence ends at the natural rate, and shrink faster than speech as the rate rises.
-5. **Acoustics** (`params.rs`) turns phonemes into 5 ms parameter frames: formant targets and transitions, stop closures with a low voice bar, bursts, aspiration, frication, nasalization, and voicing and noise cross-fades so sounds are not spliced together.
+5. **Acoustics** (`params.rs`) turns phonemes into 5 ms parameter frames: formant targets and transitions, stop closures with a low voice bar, flaps as brief voiced taps, bursts, aspiration, frication, nasalization, and voicing and noise cross-fades so sounds are not spliced together.
 6. **Synthesis** (`klatt.rs`) is KLSYN88. The voicing source runs at four times the output rate, so pitch periods need not be whole samples, and formant frequencies glide sample by sample between frames so changing a ringing filter never clicks.
 7. **Voice settings** (`lib.rs`) scale durations for rate and reshape the pitch contour for pitch and inflection.
 
@@ -133,8 +139,8 @@ CMUdict is bundled as `data/cmudict/cmudict.dict` and is the single source of di
 |---|---|
 | `tools/listen.py` | Rate- and loudness-matched blind A/B listening tests between two engines, with replay and a recorded manifest. Adapters in `tools/tts_engines.py` also support SAPI voices and eSpeak. |
 | `tools/voice_metrics.py` | Compares a rendering with a reference recording using rate-independent measures: pitch distribution, H1-H2, formants, pauses and spectral balance. |
-| `phones` | Prints the pronunciation Klatter chooses for each word (`cargo run --release --example phones < text.txt`). |
-| `segdump` | Prints the segment timeline: phones, stress, durations and targets (`cargo run --release --example segdump -- text.txt`). |
+| `phones` | Prints each word's dictionary or letter-to-sound pronunciation, before connected-speech forms (`cargo run --release --example phones < text.txt`). |
+| `segdump` | Prints the segment timeline as spoken: phones, stress, flaps, durations and targets (`cargo run --release --example segdump -- text.txt`). |
 | `lts_accuracy` | Measures letter-to-sound agreement with CMUdict (`cargo run --release --example lts_accuracy`). |
 
 The Rust diagnostics live in `tools` and are built as Cargo examples, so they are not part of the CLI, DLL or add-on. Reference recordings are not included.

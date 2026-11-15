@@ -32,8 +32,11 @@ const GAIN: f64 = 156_000.0;
 /// Keeps extreme pitch and inflection settings above the range where pulses become clicks.
 const MIN_F0: f64 = 30.0;
 
-/// Klatter's natural speaking rate, averaged over two long readings including pauses.
-pub const DEFAULT_WPM: f64 = 220.0;
+/// Klatter's natural speaking rate in long readings, including pauses: 220
+/// WPM averaged over two readings, raised 3.7% because weak forms, flaps and
+/// the retuned vowel durations shorten readings of *Alice* and
+/// *Sherlock Holmes* by that much.
+pub const DEFAULT_WPM: f64 = 228.0;
 
 /// Speaking settings in physical units, so each host maps its own scales onto them.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -33,9 +33,10 @@ const GAIN: f64 = 156_000.0;
 const MIN_F0: f64 = 30.0;
 
 /// Klatter's natural speaking rate in long readings, including pauses: 220
-/// WPM averaged over two readings, raised 2.4% because weak forms and flaps
-/// shorten readings of *Alice* and *Sherlock Holmes* by that much.
-pub const DEFAULT_WPM: f64 = 225.0;
+/// WPM averaged over two readings, raised 3.7% because weak forms, flaps and
+/// the vowel durations fitted to Eloquence shorten readings of *Alice* and
+/// *Sherlock Holmes* by that much.
+pub const DEFAULT_WPM: f64 = 228.0;
 
 /// Speaking settings in physical units, so each host maps its own scales onto them.
 #[derive(Clone, Copy, Debug, PartialEq)]

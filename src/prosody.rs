@@ -101,9 +101,13 @@ const VOWEL_SHORTENING_AFTER_ASPIRATION_MS: f64 = 20.0;
 
 /// Eloquence keeps syllables evenly timed: stressed vowels are shorter than
 /// Klatt's rules give, which avoids a drawl on content words, while unstressed
-/// syllables of content words stay audible instead of being swallowed.
+/// syllables of content words stay audible instead of being swallowed. A
+/// word's last syllable already escapes non-word-final shortening and gets the
+/// word-final postvocalic lengthening, so it needs less help; fitted to
+/// Eloquence's unstressed vowels inside and at the end of words.
 const STRESSED_VOWEL_FACTOR: f64 = 0.65;
 const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.8;
+const UNSTRESSED_WORD_FINAL_VOWEL_FACTOR: f64 = 1.5;
 
 /// Closures stay short, while fricatives need time to carry their noise cue.
 const STOP_FACTOR: f64 = 0.8;
@@ -175,9 +179,18 @@ pub fn assign_durations(segs: &mut [Seg]) {
             } else {
                 0.7
             };
-            // Phrase-final syllables are already lengthened, so they need no extra audibility.
-            if vowel && !s.function_word && !s.phrase_final {
-                prcnt *= UNSTRESSED_CONTENT_VOWEL_FACTOR;
+            // Phrase-final syllables are already lengthened, so they need no
+            // extra audibility, and nor does a schwa before a syllabic /l/
+            // ("little", "table"), whose /l/ carries the syllable.
+            let syllabic_l = ph == Ph::AX
+                && next == Some(Ph::L)
+                && segs.get(i + 1).is_some_and(|l| l.word_final);
+            if vowel && !s.function_word && !s.phrase_final && !syllabic_l {
+                prcnt *= if s.syllable + 1 < s.syllables_in_word {
+                    UNSTRESSED_CONTENT_VOWEL_FACTOR
+                } else {
+                    UNSTRESSED_WORD_FINAL_VOWEL_FACTOR
+                };
             }
         }
         if vowel && stressed {

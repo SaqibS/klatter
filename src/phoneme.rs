@@ -263,26 +263,30 @@ impl Ph {
         self.class() == Class::Stop
     }
 
-    /// Klatt (1979) inherent and minimum durations in ms.
+    /// Klatt (1979) inherent and minimum durations in ms. Eloquence spreads
+    /// its vowels less by quality than Klatt's table does: its AA, AO, AY and
+    /// UH are shorter and its IY, IH and EY longer, so those vowels are scaled
+    /// to Eloquence's durations in running speech (both scaled together, so
+    /// stress and context still compress them as Klatt's rules intend).
     pub fn durations(self) -> (f64, f64) {
         use Ph::*;
         match self {
-            AA => (240.0, 100.0),
+            AA => (180.0, 75.0),
             AE => (230.0, 80.0),
             AH => (140.0, 60.0),
-            AO => (240.0, 100.0),
+            AO => (195.0, 80.0),
             AW => (260.0, 100.0),
             AX => (120.0, 60.0),
-            AY => (250.0, 150.0),
+            AY => (200.0, 120.0),
             EH => (150.0, 70.0),
             ER => (180.0, 80.0),
-            EY => (190.0, 70.0),
-            IH => (135.0, 40.0),
+            EY => (225.0, 85.0),
+            IH => (145.0, 45.0),
             IX => (110.0, 40.0),
-            IY => (155.0, 55.0),
+            IY => (180.0, 65.0),
             OW => (220.0, 80.0),
             OY => (280.0, 150.0),
-            UH => (160.0, 60.0),
+            UH => (135.0, 50.0),
             UW => (210.0, 70.0),
             B => (85.0, 60.0),
             CH => (70.0, 50.0),

@@ -45,43 +45,10 @@ const OFFSET_RAMP_MS: f64 = 100.0;
 const VOICELESS_RAMP_MS: f64 = 80.0;
 const VOICELESS_PEAK: f64 = 0.8;
 
-/// How strongly a segment imposes its formant targets on its neighbours.
-fn dominance(p: Option<Ph>) -> u8 {
-    match p.map(Ph::class) {
-        Some(Class::Stop | Class::Affricate | Class::Fricative | Class::Nasal) => 3,
-        Some(Class::Liquid | Class::Glide) => 2,
-        Some(Class::Vowel) => 1,
-        _ => 0,
-    }
-}
-
-/// (frames inside the dominant segment, frames inside the weaker segment).
-fn transition_frames(strong: Ph) -> (usize, usize) {
-    match strong.class() {
-        Class::Stop | Class::Affricate => (
-            0,
-            ms(if strong.place() == Place::Labial {
-                60.0
-            } else {
-                50.0
-            }),
-        ),
-        Class::Fricative | Class::Nasal => (0, ms(40.0)),
-        Class::Liquid => (ms(20.0), ms(60.0)),
-        Class::Glide => (ms(30.0), ms(70.0)),
-        _ => (ms(30.0), ms(30.0)),
-    }
-}
-
 fn ms(x: f64) -> usize {
     (x / FRAME_MS).round() as usize
 }
 
-/// Transition timings from Hertz & Huffman (1992) and Hertz, Younes &
-/// Zinovieva (1999).
-const RELEASE_AFTER_FRICATIVE_MS: f64 = 30.0;
-const RELEASE_AFTER_ASPIRATION_MS: f64 = 70.0;
-const CLOSURE_AFTER_OFFGLIDE_MS: f64 = 15.0;
 /// AY, AW and OY timing, with vowels measured from voicing onset to
 /// acoustic offset: the glide
 /// takes about 55 ms and reaches the offglide just before the consonant, and
@@ -94,20 +61,6 @@ const MIN_ONSET: f64 = 0.3;
 /// Glide (start, end) as fractions of a diphthong before a voiceless
 /// obstruent, where diphthongs are short and glide early.
 const CLIPPED_GLIDE: (f64, f64) = (0.25, 0.8);
-/// Formant transitions into and out of a flap, before `TRANSITION_SCALE`. A
-/// tap is a single ballistic flick of the tongue tip (Ladefoged & Maddieson
-/// 1996, ch. 7), so the vowels around it move only briefly:
-/// a flap interrupts them for about 35-40 ms in all.
-const FLAP_TRANSITION_MS: f64 = 20.0;
-/// Transitions take about half the time these rules give;
-/// with short, evenly timed vowels, full-length transitions leave vowels
-/// drifting toward their neighbours instead of holding their quality.
-const TRANSITION_SCALE: f64 = 0.5;
-
-fn scale_transition(frames: usize) -> usize {
-    (frames as f64 * TRANSITION_SCALE).round() as usize
-}
-
 /// Velar closures are made wherever the tongue body sits for the vowel, so
 /// the velar F2 locus follows the vowel's F2 (a locus equation) instead of
 /// one fixed value: near 2,100 Hz beside IY but 1,200 to 1,700 Hz beside
@@ -140,51 +93,19 @@ fn is_obstruent(p: Ph) -> bool {
     matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
 }
 
-/// (frames before, frames after) the boundary between segments `i` and `i + 1`.
-fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
-    let (lp, rp) = (segs[i].ph?, segs[i + 1].ph?);
-    let (dl, dr) = (dominance(Some(lp)), dominance(Some(rp)));
-    Some(if dl > dr {
-        // Formants move during aspiration, so the release transition spans it.
-        let release = match lp.class() {
-            Class::Fricative => Some(RELEASE_AFTER_FRICATIVE_MS),
-            Class::Stop if segs[i + 1].aspiration_ms > 0.0 => Some(RELEASE_AFTER_ASPIRATION_MS),
-            _ => None,
-        };
-        match release {
-            Some(r) => (0, ms(r)),
-            None => transition_frames(lp),
-        }
-    } else if dr > dl {
-        let (inside, outside) = transition_frames(rp);
-        // An offglide already sits near the consonant's target, so the closure is quick.
-        let offglide = lp.spec().f_end.is_some() || (segs[i].coda && dl == 2);
-        if offglide && is_obstruent(rp) {
-            (ms(CLOSURE_AFTER_OFFGLIDE_MS), inside)
-        } else {
-            (outside, inside)
-        }
-    } else if dl == 1 {
-        transition_frames(Ph::AX)
-    } else {
-        (2, 2)
-    })
-}
-
+/// (frames before, frames after) each boundary: the transition between the
+/// two phones, timed in `timing`, in whole frames.
 fn transition_windows(segs: &[Seg], lens: &[usize]) -> Vec<(usize, usize)> {
+    let frames = |x: f64| (x / FRAME_MS).round() as usize;
     let mut windows: Vec<(usize, usize)> = (0..segs.len().saturating_sub(1))
         .map(|i| {
-            let (before, after) = transition_window(segs, i).unwrap_or((0, 0));
-            if segs[i].flap || segs[i + 1].flap {
-                // The tongue tip strikes and leaves the ridge in one ballistic movement.
-                let tap = ms(FLAP_TRANSITION_MS);
-                (before.min(tap), after.min(tap))
-            } else {
-                (before, after)
-            }
+            (
+                frames(segs[i].trans_out_ms),
+                frames(segs[i + 1].trans_in_ms),
+            )
         })
-        .map(|(before, after)| (scale_transition(before), scale_transition(after)))
         .collect();
+    // Frame rounding can still crowd a short phone; keep one target frame.
     for i in 0..segs.len() {
         let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
         let outgoing = windows.get(i).map_or(0, |w| w.0);
@@ -894,18 +815,21 @@ mod tests {
     }
 
     #[test]
-    fn release_transition_can_use_more_than_half_the_segment() {
-        let (mut segs, _, _, _) = frames_for("tea");
-        let vowel = segs.iter().position(|s| s.ph == Some(Ph::IY)).unwrap();
-        segs[vowel].dur_ms = 50.0;
-        let (starts, lens) = frame_layout(&segs);
-        let frames = build_frames(&segs);
-        let start = starts[vowel];
-        let release = scale_transition(ms(RELEASE_AFTER_ASPIRATION_MS));
-        assert!(release > lens[vowel] / 2);
-        let target = Ph::IY.spec().f;
-        assert_ne!(frames[start + release - 1].f, target);
-        assert_eq!(frames[start + release].f, target);
+    fn aspirated_release_transition_spans_the_aspiration() {
+        for text in ["tea", "to be", "key"] {
+            let (segs, starts, _, frames) = frames_for(text);
+            let i = segs.iter().position(|s| s.aspiration_ms > 0.0).unwrap();
+            let start = starts[i];
+            let aspiration = ms(segs[i].aspiration_ms);
+            let target = segs[i].ph.unwrap().spec().f;
+            assert!(
+                frames[start..start + aspiration]
+                    .iter()
+                    .all(|f| f.av == 0.0 && f.f != target),
+                "{text}"
+            );
+            assert_eq!(frames[start + aspiration].f, target, "{text}");
+        }
     }
 
     #[test]
@@ -963,14 +887,14 @@ mod tests {
         for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("noise", Ph::OY)] {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
-            let closure =
-                starts[vowel] + lens[vowel] - scale_transition(ms(CLOSURE_AFTER_OFFGLIDE_MS));
+            let windows = transition_windows(&segs, &lens);
+            let closure = starts[vowel] + lens[vowel] - windows[vowel].0;
             let offglide = closure - ms(DIPHTHONG_OFFGLIDE_MS);
             let glide = offglide - ms(DIPHTHONG_GLIDE_MS);
             let spec = ph.spec();
             let target = spec.f_end.unwrap();
             // The onset is held from the end of the incoming transition.
-            let settled = starts[vowel] + transition_windows(&segs, &lens)[vowel - 1].1;
+            let settled = starts[vowel] + windows[vowel - 1].1;
             assert!(glide > settled + (closure - settled) / 4, "{text}");
             for fr in &frames[settled..=glide] {
                 assert_eq!(fr.f, spec.f, "{text}");

@@ -6,7 +6,8 @@ use std::sync::OnceLock;
 
 use crate::phoneme::Ph;
 
-/// Caller-owned overrides; dictionary stress is still subject to connected-speech deaccenting.
+/// Caller-owned overrides; dictionary stress is still subject to connected-speech
+/// deaccenting, and /t/ and /d/ still flap, but vowels are not reduced.
 #[derive(Clone, Debug, Default)]
 pub struct Pronunciations {
     entries: HashMap<String, Vec<(Ph, u8)>>,
@@ -69,7 +70,9 @@ impl Pronunciations {
     }
 }
 
-// Some exact CMUdict matches are needed to disambiguate inflection roots.
+// Some exact CMUdict matches are needed to disambiguate inflection roots, and
+// a few entries correct CMUdict where it parts from American usage and from
+// the word's own root ("fallen" and "falling" have the vowel of "fall").
 const ENTRIES: &str = "
 AN AX0 N
 OF AX0 V
@@ -109,6 +112,8 @@ NOBODY N OW1 B AA2 D IY0
 IMPORTANT IH0 M P AO1 R T AX0 N T
 AREN'T AA1 R N T
 WE'RE W IH0 R
+FALLEN F AO1 L AX0 N
+FALLING F AO1 L IH0 NG
 ";
 
 /// Dictionary stress is independent of connected-speech deaccenting.

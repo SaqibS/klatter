@@ -80,7 +80,7 @@ pub fn aspiration_ms(segs: &[Seg], i: usize) -> f64 {
     else {
         return 0.0;
     };
-    if !ph.is_plosive() || ph.is_voiced() || after_s {
+    if !ph.is_plosive() || ph.is_voiced() || after_s || s.flap {
         return 0.0;
     }
     let ms = if next.stress > 0 && !next.function_word {
@@ -115,6 +115,10 @@ const AFFRICATE_FACTOR: f64 = 1.2;
 /// and get the full postvocalic effect, so they need trimming to avoid a drawl.
 const PHRASE_FINAL_LENGTHENING: f64 = 0.8;
 
+/// Inherent and minimum durations (ms) of a flapped /t/ or /d/: a single tap,
+/// much shorter than a stop closure (Zue & Laferriere 1979).
+const FLAP_DURATIONS: (f64, f64) = (25.0, 15.0);
+
 pub fn assign_durations(segs: &mut [Seg]) {
     let last = segs.len().saturating_sub(1);
     // The vowel's (percent, minimum), kept so its nucleus can be timed as a whole.
@@ -126,7 +130,11 @@ pub fn assign_durations(segs: &mut [Seg]) {
             continue;
         };
         let s = &segs[i];
-        let (inh, mut min) = ph.durations();
+        let (inh, mut min) = if s.flap {
+            FLAP_DURATIONS
+        } else {
+            ph.durations()
+        };
         let mut prcnt = 1.0;
         let vowel = ph.is_vowel();
         let stressed = s.stress > 0 && !s.function_word;
@@ -350,7 +358,11 @@ fn add_microprosody(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f6
         if !v.is_sonorant() || p.is_sonorant() {
             continue;
         }
-        let shift = if p.is_voiced() { -LOWER } else { RAISE };
+        let shift = if p.is_voiced() || segs[i - 1].flap {
+            -LOWER
+        } else {
+            RAISE
+        };
         for k in 0..decay.min(lens[i]) {
             f0[starts[i] + k] *= 1.0 + shift * (1.0 - k as f64 / decay as f64);
         }

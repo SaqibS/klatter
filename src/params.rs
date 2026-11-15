@@ -89,6 +89,11 @@ const DIPHTHONG_GLIDE_MS: f64 = 80.0;
 /// vowel and holds the end quality, rather than gliding until the last moment.
 const DIPHTHONG_OFFGLIDE_MS: f64 = 50.0;
 const MIN_ONSET_MS: f64 = 30.0;
+/// Formant transitions into and out of a flap, before `TRANSITION_SCALE`. A
+/// tap is a single ballistic flick of the tongue tip (Ladefoged & Maddieson
+/// 1996, ch. 7), so the vowels around it move only briefly: Eloquence's flaps
+/// interrupt them for about 35-40 ms in all.
+const FLAP_TRANSITION_MS: f64 = 20.0;
 /// Eloquence reaches vowel targets in about half the time these rules give;
 /// with its short, evenly timed vowels, full-length transitions leave vowels
 /// drifting toward their neighbours instead of holding their quality.
@@ -163,7 +168,16 @@ fn transition_window(segs: &[Seg], i: usize) -> Option<(usize, usize)> {
 
 fn transition_windows(segs: &[Seg], lens: &[usize]) -> Vec<(usize, usize)> {
     let mut windows: Vec<(usize, usize)> = (0..segs.len().saturating_sub(1))
-        .map(|i| transition_window(segs, i).unwrap_or((0, 0)))
+        .map(|i| {
+            let (before, after) = transition_window(segs, i).unwrap_or((0, 0));
+            if segs[i].flap || segs[i + 1].flap {
+                // The tongue tip strikes and leaves the ridge in one ballistic movement.
+                let tap = ms(FLAP_TRANSITION_MS);
+                (before.min(tap), after.min(tap))
+            } else {
+                (before, after)
+            }
+        })
         .map(|(before, after)| (scale_transition(before), scale_transition(after)))
         .collect();
     for i in 0..segs.len() {
@@ -264,6 +278,8 @@ fn formant_tracks(
             Some(Ph::HH) | None => (i + 1..n)
                 .chain((0..i).rev())
                 .find_map(|j| segs[j].ph.filter(|p| *p != Ph::HH)),
+            // Both flaps are voiced taps with /d/'s low F1.
+            Some(Ph::T) if segs[i].flap => Some(Ph::D),
             p => p,
         })
         .collect();
@@ -335,8 +351,8 @@ fn aspiration_frames(segs: &[Seg], i: usize, next_len: usize) -> usize {
     ms(segs[i + 1].aspiration_ms).min(next_len.saturating_sub(1))
 }
 
-fn is_voiceless(p: Option<Ph>) -> bool {
-    p.is_some_and(|p| !p.is_voiced())
+fn is_voiceless(s: Option<&Seg>) -> bool {
+    s.is_some_and(|s| s.ph.is_some_and(|p| !p.is_voiced()) && !s.flap)
 }
 
 /// Per-frame (breathiness, offset) for a sonorant: breathiness 0 is modal and
@@ -346,8 +362,8 @@ fn is_voiceless(p: Option<Ph>) -> bool {
 /// sentence-final syllables.
 fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64, f64)> {
     let s = &segs[i];
-    let prev = if i > 0 { segs[i - 1].ph } else { None };
-    let next = segs.get(i + 1).and_then(|n| n.ph);
+    let prev = i.checked_sub(1).map(|j| &segs[j]);
+    let next = segs.get(i + 1);
     let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
     let mut floor: f64 = 0.0;
@@ -463,6 +479,13 @@ pub(crate) fn build_frames_cancellable(
                 for fr in &mut frames[range] {
                     fr.av = HH_AV_DB;
                     fr.ah = HH_AH_DB;
+                }
+            }
+            Class::Stop if segs[i].flap => {
+                // A tap is too brief to stop voicing and has no release
+                // burst; voicing only drops to the level of a voiced closure.
+                for fr in &mut frames[range] {
+                    fr.av = VOICE_BAR_DB;
                 }
             }
             Class::Stop | Class::Affricate => {
@@ -762,6 +785,19 @@ mod tests {
         let stop = segs.iter().position(|s| s.ph == Some(Ph::T)).unwrap();
         assert_eq!(frames[starts[stop]].av, 0.0);
         assert_eq!(frames[starts[stop]].af, 0.0);
+    }
+
+    #[test]
+    fn flap_stays_voiced_without_burst_and_is_shorter_than_a_stop() {
+        let (segs, starts, lens, frames) = frames_for("water");
+        let flap = segs.iter().position(|s| s.flap).unwrap();
+        let tap = &frames[starts[flap]..starts[flap] + lens[flap]];
+        assert!(tap.iter().all(|f| f.av > 0.0 && f.af == 0.0 && f.ab == 0.0));
+        let vowel = &frames[starts[flap + 1]];
+        assert!(vowel.av > 0.0, "no aspiration after a flap");
+        let (stop_segs, _, stop_lens, _) = frames_for("button");
+        let stop = stop_segs.iter().position(|s| s.ph == Some(Ph::T)).unwrap();
+        assert!(lens[flap] * 2 <= stop_lens[stop]);
     }
 
     #[test]

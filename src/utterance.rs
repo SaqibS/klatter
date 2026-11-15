@@ -39,6 +39,9 @@ pub struct Seg {
     pub dur_ms: f64,
     /// Unvoiced onset budget within this segment, scaled with its duration.
     pub aspiration_ms: f64,
+    /// A /t/ or /d/ realized as an alveolar flap; `ph` keeps the phoneme so
+    /// the vowel before it keeps its voicing-dependent length.
+    pub flap: bool,
 }
 
 impl Seg {
@@ -56,6 +59,7 @@ impl Seg {
             phrase_final: false,
             dur_ms: 0.0,
             aspiration_ms: 0.0,
+            flap: false,
         }
     }
 
@@ -106,6 +110,118 @@ fn word_pronunciation(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(P
     let letters: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect();
     let phones = lts::letters_to_phonemes(word);
     lts::assign_stress(&letters, &phones)
+}
+
+/// American weak forms of function words (Ladefoged & Johnson 2011, ch. 5),
+/// used when another word follows in the phrase. A function word keeps its
+/// strong form when spoken alone and at the end of a phrase ("what is it
+/// for?"), where it is not reduced.
+const WEAK_FORMS: &[(&str, &[(Ph, u8)])] = {
+    use Ph::*;
+    &[
+        ("AS", &[(AX, 0), (Z, 0)]),
+        ("AT", &[(AX, 0), (T, 0)]),
+        ("CAN", &[(K, 0), (AX, 0), (N, 0)]),
+        ("FOR", &[(F, 0), (ER, 0)]),
+        ("FROM", &[(F, 0), (R, 0), (AX, 0), (M, 0)]),
+        ("NOR", &[(N, 0), (ER, 0)]),
+        ("OR", &[(ER, 0)]),
+        ("SHALL", &[(SH, 0), (AX, 0), (L, 0)]),
+        ("SOME", &[(S, 0), (AX, 0), (M, 0)]),
+        ("THAN", &[(DH, 0), (AX, 0), (N, 0)]),
+        ("THEM", &[(DH, 0), (AX, 0), (M, 0)]),
+        ("YOUR", &[(Y, 0), (ER, 0)]),
+    ]
+};
+
+/// The form a word takes in connected speech, given the first phoneme of the
+/// next word in its phrase (`None` before a pause).
+fn connected_form(word: &str, mut phones: Vec<(Ph, u8)>, next: Option<Ph>) -> Vec<(Ph, u8)> {
+    use Ph::*;
+    if FUNCTION_WORDS.contains(&word) {
+        let Some(next) = next else {
+            return phones;
+        };
+        // Before a vowel, "the" is [ði], and "to" and "into" keep their full
+        // vowel; before a consonant they take [ə].
+        let weak: Option<&[(Ph, u8)]> = match word {
+            "THE" if next.is_vowel() => Some(&[(DH, 0), (IY, 0)]),
+            "TO" if !next.is_vowel() => Some(&[(T, 0), (AX, 0)]),
+            "INTO" if !next.is_vowel() => Some(&[(IH, 0), (N, 0), (T, 0), (AX, 0)]),
+            _ => WEAK_FORMS
+                .iter()
+                .find(|(w, _)| *w == word)
+                .map(|(_, form)| *form),
+        };
+        return weak.map_or(phones, <[(Ph, u8)]>::to_vec);
+    }
+    reduce_unstressed(&mut phones);
+    phones
+}
+
+/// American English has two reduced vowels (Flemming & Johnson 2007): a high
+/// central [ɨ] (IX) between consonants, as in "rabbit" and "roses", and [ə]
+/// (AX) at word edges, after vowels and before syllabic /l/ ("about",
+/// "little"). Unstressed /ɪ/ reduces to [ɨ] too, except in "-ing".
+fn reduce_unstressed(phones: &mut [(Ph, u8)]) {
+    let consonant = |j: Option<usize>| {
+        j.and_then(|j| phones.get(j))
+            .is_some_and(|p| !p.0.is_vowel())
+    };
+    let reduced: Vec<bool> = (0..phones.len())
+        .map(|i| {
+            let next = phones.get(i + 1).map(|p| p.0);
+            phones[i].1 == 0
+                && match phones[i].0 {
+                    Ph::IH => next != Some(Ph::NG),
+                    Ph::AX => {
+                        consonant(i.checked_sub(1)) && consonant(Some(i + 1)) && next != Some(Ph::L)
+                    }
+                    _ => false,
+                }
+        })
+        .collect();
+    for (p, reduced) in phones.iter_mut().zip(reduced) {
+        if reduced {
+            p.0 = Ph::IX;
+        }
+    }
+}
+
+/// American flapping (Ladefoged & Johnson 2011; Zue & Laferriere 1979): /t/
+/// and /d/ after a vowel or /r/ become a brief voiced tap before an
+/// unstressed vowel in the same word ("water", "garden"), or before any vowel
+/// across a word boundary within a phrase ("get up"). Word-initial stops,
+/// stops after /n/ or /l/, and /t/ before a syllabic /n/ ("button", which is
+/// glottalized instead) keep their closure and release.
+fn mark_flaps(segs: &mut [Seg]) {
+    for i in 1..segs.len().saturating_sub(1) {
+        let (prev, s, next) = (&segs[i - 1], &segs[i], &segs[i + 1]);
+        if !matches!(s.ph, Some(Ph::T | Ph::D))
+            || s.word_initial
+            || !prev.ph.is_some_and(|p| p.is_vowel() || p == Ph::R)
+            || !next.ph.is_some_and(Ph::is_vowel)
+        {
+            continue;
+        }
+        let syllabic_n = s.ph == Some(Ph::T)
+            && !next.word_final
+            && matches!(next.ph, Some(Ph::AX | Ph::IX))
+            && segs.get(i + 2).is_some_and(|n| n.ph == Some(Ph::N));
+        segs[i].flap = s.word_final || (next.stress == 0 && !syllabic_n);
+    }
+}
+
+/// Index of the next spoken word in the same phrase as token `index`.
+fn next_in_phrase(tokens: &[Token], lexical: &[Vec<(Ph, u8)>], index: usize) -> Option<usize> {
+    for j in index + 1..tokens.len() {
+        match &tokens[j] {
+            Token::Break(_) => return None,
+            Token::Word(_) if !lexical[j].is_empty() => return Some(j),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn legal_onset(cluster: &[Ph]) -> bool {
@@ -197,6 +313,16 @@ pub(crate) fn build_plan_cancellable(
     let mut segs = vec![Seg::pause(None)];
     let mut marks = Vec::new();
     let mut words = Vec::new();
+    let mut lexical = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        if cancelled() {
+            return None;
+        }
+        lexical.push(match token {
+            Token::Word(w) => pronounce_with(w, overrides),
+            _ => Vec::new(),
+        });
+    }
     for (index, token) in tokens.iter().enumerate() {
         if cancelled() {
             return None;
@@ -212,9 +338,13 @@ pub(crate) fn build_plan_cancellable(
                 }
             }
             Token::Word(w) => {
-                let phones = pronounce_with(w, overrides);
+                let mut phones = std::mem::take(&mut lexical[index]);
                 if phones.is_empty() {
                     continue;
+                }
+                if overrides.get(w).is_none() {
+                    let next = next_in_phrase(tokens, &lexical, index).map(|j| lexical[j][0].0);
+                    phones = connected_form(w, phones, next);
                 }
                 words.push((index, segs.len()));
                 let syl = syllabify(&phones);
@@ -240,6 +370,7 @@ pub(crate) fn build_plan_cancellable(
                         phrase_final: false,
                         dur_ms: 0.0,
                         aspiration_ms: 0.0,
+                        flap: false,
                     });
                 }
             }
@@ -249,6 +380,7 @@ pub(crate) fn build_plan_cancellable(
         segs.push(Seg::pause(Some(Break::Period)));
     }
     mark_phrase_final(&mut segs);
+    mark_flaps(&mut segs);
     if cancelled() {
         None
     } else {
@@ -387,13 +519,70 @@ mod tests {
         use Ph::*;
         let segs = build(&normalize("beautiful"));
         let phones: Vec<_> = segs.iter().filter_map(|s| s.ph).collect();
-        assert_eq!(phones, vec![B, Y, UW, T, IH, F, AX, L]);
+        assert_eq!(phones, vec![B, Y, UW, T, IX, F, AX, L]);
         let vowels: Vec<_> = segs
             .iter()
             .filter(|s| s.is_vowel())
             .map(|s| (s.ph.unwrap(), s.stress))
             .collect();
-        assert_eq!(vowels, vec![(UW, 1), (IH, 0), (AX, 0)]);
+        assert_eq!(vowels, vec![(UW, 1), (IX, 0), (AX, 0)]);
+    }
+
+    fn realized(text: &str) -> String {
+        build(&normalize(text))
+            .iter()
+            .filter_map(|s| s.ph.map(|p| if s.flap { "DX" } else { p.name() }))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn alveolar_stops_flap_between_vowels_only_within_a_phrase() {
+        assert_eq!(realized("water"), "W AO DX ER");
+        assert_eq!(realized("garden"), "G AA R DX IX N");
+        assert_eq!(realized("get up"), "G EH DX AH P");
+        // Before a stressed vowel, after a nasal, word-initially, before a
+        // syllabic /n/ and before a pause, the stop keeps its release.
+        assert_eq!(realized("attack"), "AX T AE K");
+        assert_eq!(realized("winter"), "W IH N T ER");
+        assert_eq!(realized("a toy"), "AX T OY");
+        assert_eq!(realized("button"), "B AH T IX N");
+        assert_eq!(realized("get, up"), "G EH T AH P");
+        let segs = build(&normalize("water"));
+        let t = segs.iter().position(|s| s.flap).unwrap();
+        assert_eq!(crate::prosody::aspiration_ms(&segs, t), 0.0);
+    }
+
+    #[test]
+    fn unstressed_vowels_reduce_by_position() {
+        assert_eq!(realized("rabbit"), "R AE B IX T");
+        assert_eq!(realized("roses"), "R OW Z IX Z");
+        assert_eq!(realized("about"), "AX B AW T");
+        assert_eq!(realized("little"), "L IH DX AX L");
+        assert_eq!(realized("sitting"), "S IH DX IH NG");
+        // Pronunciation lookups keep the dictionary's phonemes.
+        assert_eq!(
+            pronounce("RABBIT"),
+            vec![(Ph::R, 0), (Ph::AE, 1), (Ph::B, 0), (Ph::AX, 0), (Ph::T, 0)]
+        );
+    }
+
+    #[test]
+    fn function_words_take_weak_forms_only_before_another_word() {
+        assert_eq!(realized("to go"), "T AX G OW");
+        assert_eq!(realized("to eat"), "T UW IY T");
+        assert_eq!(realized("into the box"), "IH N T AX DH AX B AA K S");
+        assert_eq!(realized("the end"), "DH IY EH N D");
+        assert_eq!(realized("the dog"), "DH AX D AO G");
+        assert_eq!(realized("wait for it"), "W EY T F ER IH T");
+        assert_eq!(realized("what is it for?"), "W AH DX IH Z IH T F AO R");
+        assert_eq!(realized("they had gone"), "DH EY HH AE D G AO N");
+        assert_eq!(realized("to"), "T UW");
+        let mut overrides = lexicon::Pronunciations::default();
+        overrides.insert("for", "F AO1 R").unwrap();
+        let segs = build_with_pronunciations(&normalize("for me"), &overrides).0;
+        let phones: Vec<_> = segs.iter().filter_map(|s| s.ph).collect();
+        assert_eq!(phones, vec![Ph::F, Ph::AO, Ph::R, Ph::M, Ph::IY]);
     }
 
     #[test]

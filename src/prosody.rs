@@ -3,6 +3,7 @@
 
 use crate::phoneme::{Class, Ph, Place};
 use crate::text::Break;
+use crate::timing;
 use crate::utterance::Seg;
 
 pub fn pause_ms(brk: Option<Break>, utterance_edge: bool) -> f64 {
@@ -249,7 +250,15 @@ pub fn assign_durations(segs: &mut [Seg]) {
             for s in &segs[i + 1..end] {
                 coda += s.dur_ms;
             }
-            segs[i].dur_ms = ((inh - min) * prcnt + min - coda).max(vowel_min);
+            // The codas also keep the transitions that are theirs, so the
+            // vowel gives up that time too.
+            let mut moved = 0.0;
+            for j in i + 1..end {
+                let ms = timing::coda_transition_ms(segs, j);
+                segs[j].dur_ms += ms;
+                moved += ms;
+            }
+            segs[i].dur_ms = ((inh - min) * prcnt + min - coda - moved).max(vowel_min);
         }
     }
     for i in 1..segs.len() {
@@ -261,11 +270,13 @@ pub fn assign_durations(segs: &mut [Seg]) {
             segs[i].aspiration_ms = asp;
         }
     }
+    timing::assign(segs, 1.0);
 }
 
-/// Speech and onset budgets scale together; pauses compress more at fast rates.
+/// Speech and onset budgets scale together; pauses compress more at fast
+/// rates, and transitions follow their own rate law (see `timing`).
 pub fn scale_durations(segs: &mut [Seg], scale: f64) {
-    for seg in segs {
+    for seg in segs.iter_mut() {
         seg.dur_ms *= if seg.ph.is_none() {
             scale.powf(PAUSE_RATE_EXPONENT)
         } else {
@@ -273,6 +284,7 @@ pub fn scale_durations(segs: &mut [Seg], scale: f64) {
         };
         seg.aspiration_ms *= scale;
     }
+    timing::assign(segs, scale);
 }
 
 const START_F0: f64 = 110.0;

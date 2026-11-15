@@ -39,6 +39,11 @@ pub struct Seg {
     pub dur_ms: f64,
     /// Unvoiced onset budget within this segment, scaled with its duration.
     pub aspiration_ms: f64,
+    /// Parts of the formant transitions from the previous segment and into
+    /// the next one that fall inside this segment's span; the rest of the
+    /// span is the phone's steady state (see `timing`).
+    pub trans_in_ms: f64,
+    pub trans_out_ms: f64,
     /// A /t/ or /d/ realized as an alveolar flap; `ph` keeps the phoneme so
     /// the vowel before it keeps its voicing-dependent length.
     pub flap: bool,
@@ -59,6 +64,8 @@ impl Seg {
             phrase_final: false,
             dur_ms: 0.0,
             aspiration_ms: 0.0,
+            trans_in_ms: 0.0,
+            trans_out_ms: 0.0,
             flap: false,
         }
     }
@@ -370,6 +377,8 @@ pub(crate) fn build_plan_cancellable(
                         phrase_final: false,
                         dur_ms: 0.0,
                         aspiration_ms: 0.0,
+                        trans_in_ms: 0.0,
+                        trans_out_ms: 0.0,
                         flap: false,
                     });
                 }

@@ -19,6 +19,7 @@ pub mod phoneme;
 pub mod prosody;
 pub mod stream;
 pub mod text;
+pub mod timing;
 pub mod utterance;
 pub mod wav;
 
@@ -238,6 +239,9 @@ fn plan_tokens_cancellable(
         });
     }
     prosody::assign_durations(&mut segs);
+    if cancelled() {
+        return None;
+    }
     let scale = DEFAULT_WPM / voice.wpm;
     prosody::scale_durations(&mut segs, scale);
     if cancelled() {

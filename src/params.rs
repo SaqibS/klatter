@@ -304,21 +304,19 @@ fn is_voiceless(s: Option<&Seg>) -> bool {
 /// Per-frame (breathiness, offset) for a sonorant: breathiness 0 is modal and
 /// 1 fully breathy; offset rises from 0 to 1 over a vowel ending in silence.
 /// Klatt & Klatt (1990) found breathiness rises toward vowel offsets into
-/// silence and near voiceless consonants, and is greater in unstressed and
-/// sentence-final syllables.
+/// silence and near voiceless consonants, and is greater in sentence-final
+/// syllables. Their male talkers' first harmonic at mid-vowel was no
+/// stronger in unstressed syllables than in stressed ones (Table II), and
+/// their vowels showed little aspiration noise (Tables V and VI), so for
+/// this male voice unstressed syllables keep modal phonation; Klatt's (1987)
+/// rules likewise kept breathiness for utterance offsets.
 fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64, f64)> {
     let s = &segs[i];
     let prev = i.checked_sub(1).map(|j| &segs[j]);
     let next = segs.get(i + 1);
     let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
-    let mut floor: f64 = 0.0;
-    if s.stress == 0 || s.function_word {
-        floor = 0.15;
-    }
-    if s.phrase_final {
-        floor = floor.max(0.25);
-    }
+    let floor: f64 = if s.phrase_final { 0.25 } else { 0.0 };
     (0..len)
         .map(|k| {
             let from_end = (len - k) as f64;
@@ -940,6 +938,18 @@ mod tests {
         let last = frames[starts[vowel] + lens[vowel] - 1];
         assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
         assert!(last.av > 0.0);
+    }
+
+    #[test]
+    fn unstressed_vowel_between_voiced_consonants_stays_modal() {
+        let (segs, starts, lens, frames) = frames_for("banana bread");
+        let vowel = segs
+            .iter()
+            .position(|s| s.ph.is_some_and(Ph::is_vowel))
+            .unwrap();
+        assert_eq!(segs[vowel].stress, 0);
+        let mid = frames[starts[vowel] + lens[vowel] / 2];
+        assert_eq!((mid.oq, mid.tl, mid.ah), (MODAL_OQ, 0.0, 0.0));
     }
 
     #[test]

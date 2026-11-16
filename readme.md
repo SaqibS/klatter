@@ -105,6 +105,10 @@ Some values were fitted to measurements of Eloquence's output instead of taken f
 - **Velar loci.** /k/ and /g/ take their F2 locus from the neighbouring vowel, following a locus equation fitted to Eloquence's onsets.
 - **Brighter voicing.** A gentle presence boost on voicing only, and fixed upper formants placed to keep energy at 3.5-5 kHz, give Klatter more high-frequency clarity than Eloquence's 11 kHz output.
 
+Where the papers' findings differ by talker, Klatter follows the data for male talkers, since its voice is male:
+
+- **Modal unstressed syllables.** Klatt & Klatt (1990) summarize breathiness as greater in unstressed syllables, but their male talkers' first harmonic at mid-vowel was no stronger in unstressed syllables (Table II) and their vowels carried little aspiration noise (Tables V and VI). Klatter keeps unstressed syllables modal and, as in Klatt's (1987) rules, reserves breathiness for phrase-final syllables, offsets into silence and the margins of voiceless consonants.
+
 ### Pipeline
 
 1. **Text** (`text.rs`) expands numbers, abbreviations, acronyms and identifiers, folds accents, and splits clauses at punctuation, keeping each word's original UTF-8 position.

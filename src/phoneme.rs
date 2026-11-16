@@ -435,11 +435,16 @@ impl Ph {
                 0.0,
                 [0.0, 0.0, 0.0, 47.0, 51.0],
             ),
+            // The postalveolars' AF is set 10 dB low: at S-like levels, with
+            // the consonant noise boost, SH and CH were 10-17 dB louder
+            // against their vowels than Eloquence's below 5.4 kHz and sounded
+            // harsh ("which", "she"), while S already matched. In listening,
+            // 6 dB lower was still too loud.
             SH => fr(
                 [300.0, 1840.0, 2750.0],
                 [200.0, 100.0, 300.0],
                 0.0,
-                60.0,
+                50.0,
                 0.0,
                 [0.0, 58.0, 55.0, 47.0, 42.0],
             ),
@@ -447,7 +452,7 @@ impl Ph {
                 [300.0, 1840.0, 2750.0],
                 [60.0, 100.0, 300.0],
                 47.0,
-                55.0,
+                45.0,
                 0.0,
                 [0.0, 58.0, 50.0, 48.0, 45.0],
             ),
@@ -505,7 +510,7 @@ impl Ph {
                 [350.0, 1800.0, 2820.0],
                 [200.0, 90.0, 300.0],
                 0.0,
-                60.0,
+                50.0,
                 0.0,
                 [0.0, 63.0, 55.0, 53.0, 50.0],
             ),
@@ -513,7 +518,7 @@ impl Ph {
                 [260.0, 1800.0, 2820.0],
                 [60.0, 80.0, 270.0],
                 47.0,
-                55.0,
+                45.0,
                 0.0,
                 [0.0, 58.0, 50.0, 48.0, 45.0],
             ),

@@ -46,6 +46,11 @@ const OFFSET_AV_DROP_DB: f64 = 10.0;
 const OFFSET_RAMP_MS: f64 = 100.0;
 const VOICELESS_RAMP_MS: f64 = 80.0;
 const VOICELESS_PEAK: f64 = 0.8;
+/// Klatt & Klatt (1990) found the first harmonic at mid-vowel no stronger
+/// after [h] than after a glottal stop (Table II): even [h]'s wide glottal
+/// opening does not reach the middle of the vowel. So the breathy margins of
+/// voiceless consonants stay within this share of a sonorant at each end.
+const VOICELESS_MARGIN_SHARE: f64 = 1.0 / 3.0;
 
 fn ms(x: f64) -> usize {
     (x / FRAME_MS).round() as usize
@@ -316,6 +321,7 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
     let next = segs.get(i + 1);
     let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
+    let margin = frames(VOICELESS_RAMP_MS).min((len as f64 * VOICELESS_MARGIN_SHARE).max(1.0));
     let floor: f64 = if s.phrase_final { 0.25 } else { 0.0 };
     (0..len)
         .map(|k| {
@@ -326,10 +332,10 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
                 offset = (1.0 - from_end / frames(OFFSET_RAMP_MS)).max(0.0);
                 b = b.max(offset);
             } else if is_voiceless(next) {
-                b = b.max(VOICELESS_PEAK * (1.0 - from_end / frames(VOICELESS_RAMP_MS)));
+                b = b.max(VOICELESS_PEAK * (1.0 - from_end / margin));
             }
             if is_voiceless(prev) {
-                b = b.max(VOICELESS_PEAK * (1.0 - (k + 1) as f64 / frames(VOICELESS_RAMP_MS)));
+                b = b.max(VOICELESS_PEAK * (1.0 - (k + 1) as f64 / margin));
             }
             (b.clamp(0.0, 1.0), offset)
         })
@@ -938,6 +944,16 @@ mod tests {
         let last = frames[starts[vowel] + lens[vowel] - 1];
         assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
         assert!(last.av > 0.0);
+    }
+
+    #[test]
+    fn breathy_margins_of_voiceless_consonants_leave_a_modal_middle() {
+        let (segs, starts, lens, frames) = frames_for("sit down");
+        let vowel = segs.iter().position(|s| s.ph == Some(Ph::IH)).unwrap();
+        let vowel = &frames[starts[vowel]..starts[vowel] + lens[vowel]];
+        let modal = vowel.iter().filter(|f| f.oq == MODAL_OQ && f.ah == 0.0);
+        assert!(modal.count() * 3 >= vowel.len() - 1, "{}", vowel.len());
+        assert!(vowel[0].oq > MODAL_OQ && vowel[vowel.len() - 1].oq > MODAL_OQ);
     }
 
     #[test]

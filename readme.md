@@ -108,6 +108,7 @@ Some values were fitted to measurements of Eloquence's output instead of taken f
 Where the papers' findings differ by talker, Klatter follows the data for male talkers, since its voice is male:
 
 - **Modal unstressed syllables.** Klatt & Klatt (1990) summarize breathiness as greater in unstressed syllables, but their male talkers' first harmonic at mid-vowel was no stronger in unstressed syllables (Table II) and their vowels carried little aspiration noise (Tables V and VI). Klatter keeps unstressed syllables modal and, as in Klatt's (1987) rules, reserves breathiness for phrase-final syllables, offsets into silence and the margins of voiceless consonants.
+- **Short voiceless margins.** The breathy margins beside voiceless consonants follow the 80 ms ramps of Klatt & Klatt's Figs. 15 and 16 but stay within the outer third of a sonorant, because their Table II shows that even [h] does not make the middle of the vowel breathier.
 
 ### Pipeline
 

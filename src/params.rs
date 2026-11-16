@@ -44,6 +44,18 @@ const OFFSET_AV_DROP_DB: f64 = 10.0;
 const OFFSET_RAMP_MS: f64 = 100.0;
 const VOICELESS_RAMP_MS: f64 = 80.0;
 const VOICELESS_PEAK: f64 = 0.8;
+/// Klatt & Klatt (1990) found the first harmonic at mid-vowel no stronger
+/// after [h] than after a glottal stop (Table II): even [h]'s wide glottal
+/// opening does not reach the middle of the vowel. So the breathy margins of
+/// voiceless consonants stay within this share of a sonorant at each end.
+const VOICELESS_MARGIN_SHARE: f64 = 1.0 / 3.0;
+/// Stressed syllables are spoken with more vocal effort and are more intense
+/// (Fry 1955; Lehiste 1970). Klatt & Klatt's (1990) male talkers' stressed
+/// syllables were 4.3 dB more intense at mid-vowel, partly from their higher
+/// F0, which the pitch contour already supplies. Klatt (1987) found a large
+/// stress-intensity rule makes stressed vowels sound artificially strong, so
+/// the rest of the difference is taken from unstressed vowels, modestly.
+const UNSTRESSED_AV_DROP_DB: f64 = 3.0;
 
 fn ms(x: f64) -> usize {
     (x / FRAME_MS).round() as usize
@@ -302,21 +314,26 @@ fn is_voiceless(s: Option<&Seg>) -> bool {
 /// Per-frame (breathiness, offset) for a sonorant: breathiness 0 is modal and
 /// 1 fully breathy; offset rises from 0 to 1 over a vowel ending in silence.
 /// Klatt & Klatt (1990) found breathiness rises toward vowel offsets into
-/// silence and near voiceless consonants, and is greater in unstressed and
-/// sentence-final syllables.
+/// silence and near voiceless consonants, and is greater in sentence-final
+/// syllables. Their male talkers' first harmonic at mid-vowel was no
+/// stronger in unstressed syllables than in stressed ones (Table II), and
+/// their vowels showed little aspiration noise (Tables V and VI), so for
+/// this male voice unstressed syllables keep modal phonation; Klatt's (1987)
+/// rules likewise kept breathiness for utterance offsets.
 fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64, f64)> {
     let s = &segs[i];
     let prev = i.checked_sub(1).map(|j| &segs[j]);
     let next = segs.get(i + 1);
     let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
-    let mut floor: f64 = 0.0;
-    if s.stress == 0 || s.function_word {
-        floor = 0.15;
-    }
-    if s.phrase_final {
-        floor = floor.max(0.25);
-    }
+    // A breathy onset after a voiceless plosive starts where voicing does,
+    // after the aspiration.
+    let voicing = i
+        .checked_sub(1)
+        .map_or(0, |j| aspiration_frames(segs, j, len));
+    let voiced_len = (len - voicing) as f64;
+    let margin = frames(VOICELESS_RAMP_MS).min((voiced_len * VOICELESS_MARGIN_SHARE).max(1.0));
+    let floor: f64 = if s.phrase_final { 0.25 } else { 0.0 };
     (0..len)
         .map(|k| {
             let from_end = (len - k) as f64;
@@ -326,10 +343,11 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
                 offset = (1.0 - from_end / frames(OFFSET_RAMP_MS)).max(0.0);
                 b = b.max(offset);
             } else if is_voiceless(next) {
-                b = b.max(VOICELESS_PEAK * (1.0 - from_end / frames(VOICELESS_RAMP_MS)));
+                b = b.max(VOICELESS_PEAK * (1.0 - from_end / margin));
             }
             if is_voiceless(prev) {
-                b = b.max(VOICELESS_PEAK * (1.0 - (k + 1) as f64 / frames(VOICELESS_RAMP_MS)));
+                let from_onset = (k + 1).saturating_sub(voicing) as f64;
+                b = b.max(VOICELESS_PEAK * (1.0 - from_onset / margin));
             }
             (b.clamp(0.0, 1.0), offset)
         })
@@ -404,8 +422,15 @@ pub(crate) fn build_frames_cancellable(
         let len = lens[i];
         match ph.class() {
             Class::Vowel | Class::Liquid | Class::Glide | Class::Nasal => {
+                let unstressed = ph.is_vowel() && (segs[i].stress == 0 || segs[i].function_word);
+                let av = spec.av
+                    - if unstressed {
+                        UNSTRESSED_AV_DROP_DB
+                    } else {
+                        0.0
+                    };
                 for fr in &mut frames[range] {
-                    fr.av = spec.av;
+                    fr.av = av;
                     if ph.class() == Class::Nasal {
                         fr.fnz = NASAL_ZERO_HZ;
                     }
@@ -464,6 +489,7 @@ pub(crate) fn build_frames_cancellable(
         return None;
     }
 
+    let half = CROSS_FADE_FRAMES / 2;
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
     for i in 0..segs.len().saturating_sub(1) {
@@ -475,6 +501,20 @@ pub(crate) fn build_frames_cancellable(
             fr.av = 0.0;
             fr.ah = ASPIRATION_DB;
             fr.b[0] += 150.0;
+        }
+        if n == 0 {
+            continue;
+        }
+        // The folds adduct gradually after aspiration (Lofqvist & McGowan
+        // 1992), so voicing grows over the same cross-fade as other onsets
+        // rather than switching on at full strength.
+        let onset = starts[i + 1] + n;
+        let end = starts[i + 1] + lens[i + 1];
+        for (d, fr) in frames[onset..end].iter_mut().take(half).enumerate() {
+            if fr.av > 0.0 {
+                let voiced = (half + 1 + d) as f64 / CROSS_FADE_FRAMES as f64;
+                fr.av = lerp(FADE_FLOOR_DB, fr.av, voiced);
+            }
         }
     }
 
@@ -492,7 +532,6 @@ pub(crate) fn build_frames_cancellable(
             }
         }
     }
-    let half = CROSS_FADE_FRAMES / 2;
     for i in 0..segs.len() {
         if cancelled() {
             return None;
@@ -938,6 +977,55 @@ mod tests {
         let last = frames[starts[vowel] + lens[vowel] - 1];
         assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
         assert!(last.av > 0.0);
+    }
+
+    #[test]
+    fn voicing_grows_breathily_after_aspiration() {
+        let (segs, starts, lens, frames) = frames_for("take a cup");
+        let i = segs.iter().position(|s| s.ph == Some(Ph::EY)).unwrap();
+        let vowel = &frames[starts[i]..starts[i] + lens[i]];
+        let onset = vowel.iter().position(|f| f.av > 0.0).unwrap();
+        assert!(onset > 0);
+        let av: Vec<f64> = vowel[onset..onset + 3].iter().map(|f| f.av).collect();
+        assert!(av[0] < av[1] && av[1] < av[2], "{av:?}");
+        assert_eq!(av[2], Ph::EY.spec().av);
+        assert!(vowel[onset].oq > vowel[onset + 3].oq && vowel[onset].ah > 0.0);
+    }
+
+    #[test]
+    fn breathy_margins_of_voiceless_consonants_leave_a_modal_middle() {
+        let (segs, starts, lens, frames) = frames_for("sit down");
+        let vowel = segs.iter().position(|s| s.ph == Some(Ph::IH)).unwrap();
+        let vowel = &frames[starts[vowel]..starts[vowel] + lens[vowel]];
+        let modal = vowel.iter().filter(|f| f.oq == MODAL_OQ && f.ah == 0.0);
+        assert!(modal.count() * 3 >= vowel.len() - 1, "{}", vowel.len());
+        assert!(vowel[0].oq > MODAL_OQ && vowel[vowel.len() - 1].oq > MODAL_OQ);
+    }
+
+    #[test]
+    fn unstressed_vowel_between_voiced_consonants_stays_modal() {
+        let (segs, starts, lens, frames) = frames_for("banana bread");
+        let vowel = segs
+            .iter()
+            .position(|s| s.ph.is_some_and(Ph::is_vowel))
+            .unwrap();
+        assert_eq!(segs[vowel].stress, 0);
+        let mid = frames[starts[vowel] + lens[vowel] / 2];
+        assert_eq!((mid.oq, mid.tl, mid.ah), (MODAL_OQ, 0.0, 0.0));
+    }
+
+    #[test]
+    fn unstressed_vowels_are_voiced_more_weakly_than_stressed_ones() {
+        let (segs, starts, lens, frames) = frames_for("banana bread");
+        let mid_av = |i: usize| frames[starts[i] + lens[i] / 2].av;
+        let vowels: Vec<usize> = (0..segs.len())
+            .filter(|&i| segs[i].ph.is_some_and(Ph::is_vowel))
+            .collect();
+        let (weak, strong) = (vowels[0], vowels[1]);
+        assert_eq!(segs[strong].stress, 1);
+        let spec = |i: usize| segs[i].ph.unwrap().spec().av;
+        assert_eq!(mid_av(weak), spec(weak) - UNSTRESSED_AV_DROP_DB);
+        assert_eq!(mid_av(strong), spec(strong));
     }
 
     #[test]

@@ -53,8 +53,10 @@ const OVERSAMPLE: usize = 4;
 const DECIMATION_TAPS: usize = 64;
 
 const CASCADE_GAIN: f64 = 1.0;
-/// Peak glottal flow at AV = 60 dB and F0 = 100 Hz. The paper scales the peak
-/// by the period (AV x T0) so the closure excitation is independent of F0.
+/// Peak glottal flow at AV = 60 dB and F0 = 100 Hz. The peak is scaled by the
+/// period (AV x T0), a design choice rather than the paper's (which defines
+/// AV as the pulse's peak amplitude), so the closure excitation is
+/// independent of F0.
 const GLOTTAL_PEAK: f64 = 0.75;
 const REFERENCE_PERIOD_S: f64 = 0.01;
 const PARALLEL_GAIN: f64 = 0.035;
@@ -409,8 +411,11 @@ impl GlottalSource {
     }
 }
 
-/// Gaussian noise with the 1980 synthesizer's low-pass, which the radiation
-/// characteristic then flattens.
+/// Gaussian noise through a one-pole low-pass, which the radiation first
+/// difference follows. Klatt's (1980) low-pass is an integrator that the
+/// radiation exactly cancels, leaving flat noise; this pole of 0.75 leaves a
+/// high-pass shelf instead (about 8 dB down at 300 Hz relative to 4 kHz),
+/// with which the consonant and aspiration levels were set.
 struct NoiseSource {
     rng: u32,
     lp: f64,

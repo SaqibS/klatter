@@ -1,5 +1,8 @@
 //! Phoneme inventory (ARPAbet) with features, Klatt (1979) inherent and minimum
-//! durations, and synthesis targets based on Klatt (1980), Table III.
+//! durations, and synthesis targets: obstruent formants and loci from Klatt
+//! (1980), Table III, with vowel, sonorant and nasal formants and consonant
+//! noise levels tuned separately, and parallel amplitudes on this
+//! synthesizer's own scale.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Ph {

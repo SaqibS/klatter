@@ -52,9 +52,11 @@ const VOICELESS_MARGIN_SHARE: f64 = 1.0 / 3.0;
 /// Stressed syllables are spoken with more vocal effort and are more intense
 /// (Fry 1955; Lehiste 1970). Klatt & Klatt's (1990) male talkers' stressed
 /// syllables were 4.3 dB more intense at mid-vowel, partly from their higher
-/// F0, which the pitch contour already supplies. Klatt (1987) found a large
-/// stress-intensity rule makes stressed vowels sound artificially strong, so
-/// the rest of the difference is taken from unstressed vowels, modestly.
+/// F0, which the pitch contour already supplies. Klatt (1987) notes that F0
+/// alone raises the intensity of stressed vowels and that a specific rule to
+/// increase their intensity made them sound artificially strong. Klatter
+/// instead takes a modest part of the difference from unstressed vowels,
+/// which a listener preferred in blind comparison.
 const UNSTRESSED_AV_DROP_DB: f64 = 3.0;
 
 fn ms(x: f64) -> usize {
@@ -99,6 +101,36 @@ fn velar_f2_locus(segs: &[Seg], i: usize) -> Option<f64> {
             .map(|s| s.f_end.unwrap_or(s.f)[1])
     })?;
     Some(VELAR_LOCUS_BASE_HZ + VELAR_LOCUS_SLOPE * f2)
+}
+
+/// Klatt's (1980) labial and alveolar stop F2 and F3 targets are virtual
+/// loci: at the release the formants lie between the locus and the vowel.
+/// A fixed onset (a "hub") makes listeners hear the wrong consonant before
+/// some vowels (Delattre et al. 1955, in Klatt 1987, Fig. 16), so the stop
+/// takes the point `k` of the way from its locus to the vowel it releases
+/// into, or else the vowel before it, with Delattre's and Holmes's k of 0.5
+/// (Klatt 1987, note 4).
+const LOCUS_K: f64 = 0.5;
+
+/// F2 and F3 at the labial or alveolar stop at `i`, from its virtual loci.
+fn stop_f2_f3(segs: &[Seg], i: usize) -> Option<[f64; 2]> {
+    let ph = segs[i].ph?;
+    if ph.class() != Class::Stop || !matches!(ph.place(), Place::Labial | Place::Alveolar) {
+        return None;
+    }
+    let vowel = |j: usize| {
+        segs.get(j)
+            .and_then(|s| s.ph)
+            .filter(|p| p.is_vowel())
+            .map(Ph::spec)
+    };
+    let v = vowel(i + 1).map(|s| s.f).or_else(|| {
+        i.checked_sub(1)
+            .and_then(vowel)
+            .map(|s| s.f_end.unwrap_or(s.f))
+    })?;
+    let locus = ph.spec().f;
+    Some([1, 2].map(|j| lerp(locus[j], v[j], LOCUS_K)))
 }
 
 fn is_obstruent(p: Ph) -> bool {
@@ -258,6 +290,12 @@ fn formant_tracks(
                 f.f[1] = f2;
             }
         }
+        if let Some([f2, f3]) = stop_f2_f3(segs, i) {
+            for f in &mut t {
+                f.f[1] = f2;
+                f.f[2] = f3;
+            }
+        }
         if segs[i].ph == Some(Ph::HH) {
             for f in &mut t {
                 f.b = [300.0, 150.0, 200.0];
@@ -312,19 +350,29 @@ fn is_voiceless(s: Option<&Seg>) -> bool {
 }
 
 /// Per-frame (breathiness, offset) for a sonorant: breathiness 0 is modal and
-/// 1 fully breathy; offset rises from 0 to 1 over a vowel ending in silence.
+/// 1 fully breathy; offset rises from 0 to 1 over the end of voicing before
+/// silence.
 /// Klatt & Klatt (1990) found breathiness rises toward vowel offsets into
 /// silence and near voiceless consonants, and is greater in sentence-final
 /// syllables. Their male talkers' first harmonic at mid-vowel was no
 /// stronger in unstressed syllables than in stressed ones (Table II), and
-/// their vowels showed little aspiration noise (Tables V and VI), so for
+/// their vowels' noise ratings were low, if somewhat higher in unstressed
+/// syllables (Tables V and VI), so for
 /// this male voice unstressed syllables keep modal phonation; Klatt's (1987)
 /// rules likewise kept breathiness for utterance offsets.
-fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64, f64)> {
+fn breathiness(segs: &[Seg], lens: &[usize], i: usize, time_scale: f64) -> Vec<(f64, f64)> {
     let s = &segs[i];
+    let len = lens[i];
     let prev = i.checked_sub(1).map(|j| &segs[j]);
     let next = segs.get(i + 1);
-    let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
+    // Klatt & Klatt's (1990, Fig. 15) offset ramp spans the last stretch of
+    // voicing, so it starts in the vowel before a short final sonorant such
+    // as the /l/ of "table" instead of starting halfway at the /l/.
+    let run_end = (i + 1..segs.len())
+        .find(|&j| !segs[j].ph.is_some_and(Ph::is_sonorant))
+        .unwrap_or(segs.len());
+    let before_silence = segs.get(run_end).is_none_or(|n| n.ph.is_none());
+    let tail: usize = lens[i + 1..run_end].iter().sum();
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
     // A breathy onset after a voiceless plosive starts where voicing does,
     // after the aspiration.
@@ -340,7 +388,8 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
             let mut b = floor;
             let mut offset = 0.0;
             if before_silence {
-                offset = (1.0 - from_end / frames(OFFSET_RAMP_MS)).max(0.0);
+                let to_silence = from_end + tail as f64;
+                offset = (1.0 - to_silence / frames(OFFSET_RAMP_MS)).max(0.0);
                 b = b.max(offset);
             } else if is_voiceless(next) {
                 b = b.max(VOICELESS_PEAK * (1.0 - from_end / margin));
@@ -354,7 +403,7 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
         .collect()
 }
 
-/// Applies breathy phonation (Klatt & Klatt 1990, Sec. III B steps 5 and 6):
+/// Applies breathy phonation (Klatt & Klatt 1990, Sec. III A steps 4 to 6):
 /// a higher open quotient strengthens the first harmonic, spectral tilt
 /// weakens the upper harmonics, aspiration noise replaces them, and glottal
 /// losses widen B1 and B2.
@@ -484,6 +533,30 @@ pub(crate) fn build_frames_cancellable(
     }
 
     cross_fade(segs, starts, lens, &mut frames);
+    // Voicing of a voiceless plosive starts only after its burst (and any
+    // aspiration), which is what voice-onset time measures (Klatt 1987), so
+    // the cross-fade must not carry the vowel's voicing back into the burst.
+    for i in 0..segs.len() {
+        if segs[i].flap || !segs[i].ph.is_some_and(|p| p.is_plosive() && !p.is_voiced()) {
+            continue;
+        }
+        for fr in &mut frames[starts[i]..starts[i] + lens[i]] {
+            if fr.af > 0.0 {
+                fr.av = 0.0;
+            }
+        }
+    }
+    // A flap is a brief tap of the tongue tip (Zue & Laferriere 1979), heard
+    // as a short dip in voicing. Averaged with the vowels around it, a one-
+    // or two-frame tap at fast rates lost all but 1-2 dB of its dip, so its
+    // own frames keep the voiced-closure level after the cross-fade.
+    for i in 0..segs.len() {
+        if segs[i].flap {
+            for fr in &mut frames[starts[i]..starts[i] + lens[i]] {
+                fr.av = fr.av.min(VOICE_BAR_DB);
+            }
+        }
+    }
     nasalize_vowels(segs, starts, lens, &mut frames);
     if cancelled() {
         return None;
@@ -507,10 +580,10 @@ pub(crate) fn build_frames_cancellable(
         }
         // The folds adduct gradually after aspiration (Lofqvist & McGowan
         // 1992), so voicing grows over the same cross-fade as other onsets
-        // rather than switching on at full strength.
+        // rather than switching on at full strength, continuing into the
+        // next phone when aspiration leaves a short sonorant little voicing.
         let onset = starts[i + 1] + n;
-        let end = starts[i + 1] + lens[i + 1];
-        for (d, fr) in frames[onset..end].iter_mut().take(half).enumerate() {
+        for (d, fr) in frames[onset..].iter_mut().take(half).enumerate() {
             if fr.av > 0.0 {
                 let voiced = (half + 1 + d) as f64 / CROSS_FADE_FRAMES as f64;
                 fr.av = lerp(FADE_FLOOR_DB, fr.av, voiced);
@@ -525,7 +598,7 @@ pub(crate) fn build_frames_cancellable(
         if !segs[i].ph.is_some_and(Ph::is_sonorant) {
             continue;
         }
-        let b = breathiness(segs, i, lens[i], time_scale);
+        let b = breathiness(segs, lens, i, time_scale);
         for (fr, b) in frames[starts[i]..starts[i] + lens[i]].iter_mut().zip(b) {
             if fr.av > 0.0 {
                 apply_voice_quality(fr, b.0, b.1);
@@ -771,6 +844,58 @@ mod tests {
     }
 
     #[test]
+    fn voiceless_plosive_bursts_are_unvoiced_at_every_rate() {
+        for text in ["a tea", "a stay", "pick it up", "to cut"] {
+            for scale in [1.0, 0.5, 0.38] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                for i in 0..segs.len() {
+                    if segs[i].flap || !segs[i].ph.is_some_and(|p| p.is_plosive() && !p.is_voiced())
+                    {
+                        continue;
+                    }
+                    let burst = frames[starts[i]..starts[i] + lens[i]]
+                        .iter()
+                        .filter(|f| f.af > 0.0);
+                    assert!(
+                        burst.clone().count() > 0 && burst.clone().all(|f| f.av == 0.0),
+                        "{text}, scale {scale}: {:?}",
+                        segs[i].ph
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flaps_dip_in_voicing_at_every_rate() {
+        for text in ["water", "a city", "get up"] {
+            for scale in [1.0, 0.5, 0.38] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                let flap = segs.iter().position(|s| s.flap).unwrap();
+                let peak = |i: usize| {
+                    frames[starts[i]..starts[i] + lens[i]]
+                        .iter()
+                        .map(|f| f.av)
+                        .fold(0.0, f64::max)
+                };
+                let tap = &frames[starts[flap]..starts[flap] + lens[flap]];
+                let dip = peak(flap - 1).min(peak(flap + 1))
+                    - tap.iter().map(|f| f.av).fold(f64::MAX, f64::min);
+                assert!(dip >= 6.0, "{text}, scale {scale}: dip {dip}");
+                assert!(tap.iter().all(|f| f.av > 0.0));
+            }
+        }
+    }
+
+    #[test]
     fn flap_stays_voiced_without_burst_and_is_shorter_than_a_stop() {
         let (segs, starts, lens, frames) = frames_for("water");
         let flap = segs.iter().position(|s| s.flap).unwrap();
@@ -841,8 +966,8 @@ mod tests {
             s.dur_ms = 180.0;
         }
         let vowel = segs.iter().position(|s| s.ph == Some(Ph::IY)).unwrap();
-        let natural = breathiness(&segs, vowel, 36, 1.0);
-        let fast = breathiness(&segs, vowel, 12, 1.0 / 3.0);
+        let natural = breathiness(&segs, &vec![36; segs.len()], vowel, 1.0);
+        let fast = breathiness(&segs, &vec![12; segs.len()], vowel, 1.0 / 3.0);
         for (k, &(b, offset)) in fast.iter().enumerate() {
             let corresponding = natural[k * 3];
             assert!((b - corresponding.0).abs() < 1e-12, "frame {k}: {b}");
@@ -970,6 +1095,34 @@ mod tests {
     }
 
     #[test]
+    fn breathy_offset_spans_a_short_final_sonorant_and_its_vowel() {
+        for text in ["table.", "the weather is terrible.", "again."] {
+            for scale in [1.0, 0.5] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                let last = segs.iter().rposition(|s| s.ph.is_some()).unwrap();
+                assert!(
+                    !segs[last].is_vowel() && segs[last - 1].is_vowel(),
+                    "{text}"
+                );
+                let (a, b) = (frames[starts[last] - 1], frames[starts[last]]);
+                assert!(a.oq > MODAL_OQ + 6.5, "{text}, scale {scale}: {}", a.oq);
+                assert!(
+                    (a.av - b.av).abs() < 3.0 && (b.oq - a.oq).abs() < 4.0,
+                    "{text}, scale {scale}: av {} -> {}, oq {} -> {}",
+                    a.av,
+                    b.av,
+                    a.oq,
+                    b.oq
+                );
+            }
+        }
+    }
+
+    #[test]
     fn vowel_becomes_breathy_before_silence() {
         let (segs, starts, lens, frames) = frames_for("saw");
         let vowel = segs.iter().position(|s| s.ph == Some(Ph::AO)).unwrap();
@@ -977,6 +1130,32 @@ mod tests {
         let last = frames[starts[vowel] + lens[vowel] - 1];
         assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
         assert!(last.av > 0.0);
+    }
+
+    #[test]
+    fn voicing_keeps_growing_after_aspiration_fills_a_short_sonorant() {
+        for text in ["likely", "country", "quick", "try"] {
+            for scale in [1.0, 0.5, 0.38] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames_with_time_scale(&segs, &starts, &lens, scale);
+                for i in 1..segs.len() {
+                    if segs[i].aspiration_ms == 0.0 {
+                        continue;
+                    }
+                    let onset = starts[i] + ms(segs[i].aspiration_ms).min(lens[i] - 1);
+                    let av: Vec<f64> = frames[onset..(onset + 4).min(frames.len())]
+                        .iter()
+                        .map(|f| f.av)
+                        .collect();
+                    for w in av.windows(2) {
+                        assert!(w[1] - w[0] < 7.0, "{text}, scale {scale}: {av:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1047,6 +1226,23 @@ mod tests {
                 .iter()
                 .all(|f| f.fnz == Frame::default().fnz)
         );
+    }
+
+    #[test]
+    fn labial_and_alveolar_stops_start_between_locus_and_vowel() {
+        let onset = |text: &str, ph: Ph| {
+            let (segs, starts, lens, frames) = frames_for(text);
+            let i = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
+            frames[starts[i] + lens[i] - 1].f[1]
+        };
+        for ph in [Ph::D, Ph::B] {
+            let name = ph.name().to_lowercase();
+            let (front, back) = (
+                onset(&format!("a {name}ee"), ph),
+                onset(&format!("a {name}oo"), ph),
+            );
+            assert!(front > back + 300.0, "{ph:?}: {front} {back}");
+        }
     }
 
     #[test]

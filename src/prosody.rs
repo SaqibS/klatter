@@ -1,5 +1,6 @@
-//! Prosody: Klatt's (1979) segmental duration rules, as summarized in Klatt
-//! (1987), with rate-normalized accent peaks and declination.
+//! Prosody: Klatt's (1979) segmental duration rules, whose form Klatt (1987)
+//! summarizes without the numbers, with rate-normalized accent peaks and
+//! declination.
 
 use crate::phoneme::{Class, Ph, Place};
 use crate::text::Break;
@@ -82,6 +83,13 @@ pub fn aspiration_ms(segs: &[Seg], i: usize) -> f64 {
         return 0.0;
     };
     if !ph.is_plosive() || ph.is_voiced() || after_s || s.flap {
+        return 0.0;
+    }
+    // Aspiration belongs to a plosive released into its own syllable: a coda
+    // plosive before the next word ("night rate" vs "nitrate", Klatt 1987)
+    // or syllable is weakly aspirated, and a plosive before a nasal is
+    // released through the nose rather than aspirated.
+    if s.coda || next.ph.is_some_and(|p| p.class() == Class::Nasal) {
         return 0.0;
     }
     let ms = if next.stress > 0 && !next.function_word {
@@ -229,9 +237,11 @@ pub fn assign_durations(segs: &mut [Seg]) {
         }
     }
 
-    // The vowel's context scales its whole nucleus; coda liquids and glides
-    // keep their own durations and the vowel takes the remainder, so vowel and
-    // coda trade time (Hertz & Huffman 1992).
+    // The vowel's context scales its whole nucleus, coda liquids and glides
+    // included: Hertz's (1991, Fig. 12) [l] is as long as the vowel before a
+    // voiced stop and shortens with it before a voiceless one, and Hertz &
+    // Huffman (1992) lengthen the non-vowel phones of a nucleus first. The
+    // vowel takes the remainder, so vowel and coda trade time.
     for i in 0..segs.len() {
         if !segs[i].is_vowel() {
             continue;
@@ -240,14 +250,20 @@ pub fn assign_durations(segs: &mut [Seg]) {
         if end > i + 1 {
             let (prcnt, vowel_min) = vowel_scaling[i];
             let stressed = segs[i].stress > 0 && !segs[i].function_word;
+            let scaled = |s: &Seg| {
+                let (h, m) = s.ph.map(Ph::durations).unwrap_or_default();
+                let m = if stressed { m } else { m / 2.0 };
+                (h, m, (h - m) * prcnt + m)
+            };
             let (mut inh, mut min, mut coda) = (0.0, 0.0, 0.0);
             for s in &segs[i..end] {
-                let (h, m) = s.ph.map(Ph::durations).unwrap_or_default();
+                let (h, m, _) = scaled(s);
                 inh += h;
-                min += if stressed { m } else { m / 2.0 };
+                min += m;
             }
-            for s in &segs[i + 1..end] {
-                coda += s.dur_ms;
+            for j in i + 1..end {
+                segs[j].dur_ms = scaled(&segs[j]).2;
+                coda += segs[j].dur_ms;
             }
             // The codas also keep the transitions that are theirs, so the
             // vowel gives up that time too.
@@ -369,7 +385,11 @@ pub(crate) fn f0_contour_cancellable(
 /// Consonants perturb the F0 of the sonorant after them: a voiceless one
 /// raises its onset and a voiced one lowers it. Listeners use this as a
 /// voicing cue, and its absence is part of what makes synthetic pitch sound
-/// drawn with a ruler.
+/// drawn with a ruler. Vocal-fold vibration that continues through a voiced
+/// consonant, a flap or this voice's voiced /h/ cannot change rate in one
+/// pitch period, so there the perturbation builds up across the consonant;
+/// and it decays over the same time whether or not the sonorant lasts that
+/// long, rather than snapping back at the next phone.
 fn add_microprosody(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f64, f0: &mut [f64]) {
     const RAISE: f64 = 0.08;
     const LOWER: f64 = 0.04;
@@ -387,8 +407,15 @@ fn add_microprosody(segs: &[Seg], starts: &[usize], lens: &[usize], frame_ms: f6
         } else {
             RAISE
         };
-        for k in 0..decay.min(lens[i]) {
-            f0[starts[i] + k] *= 1.0 + shift * (1.0 - k as f64 / decay as f64);
+        if p.is_voiced() || segs[i - 1].flap || p == Ph::HH {
+            let n = lens[i - 1];
+            for k in 0..n {
+                f0[starts[i - 1] + k] *= 1.0 + shift * (k + 1) as f64 / (n + 1) as f64;
+            }
+        }
+        let onset = starts[i];
+        for (k, f) in f0[onset..].iter_mut().take(decay).enumerate() {
+            *f *= 1.0 + shift * (1.0 - k as f64 / decay as f64);
         }
     }
 }
@@ -504,6 +531,69 @@ mod tests {
     use super::*;
     use crate::text::normalize;
     use crate::utterance::build;
+
+    #[test]
+    fn coda_liquids_scale_with_their_nucleus() {
+        let liquid = |text: &str| {
+            let mut segs = build(&normalize(text));
+            assign_durations(&mut segs);
+            let l = segs.iter().position(|s| s.ph == Some(Ph::L)).unwrap();
+            segs[l].dur_ms
+        };
+        assert!(liquid("they held it") > liquid("they felt it") + 1.0);
+        assert!(liquid("it was cold.") > liquid("it was colder") + 5.0);
+    }
+
+    #[test]
+    fn only_plosives_released_into_their_own_syllable_aspirate() {
+        let aspirated = |text: &str, ph: Ph| {
+            let mut segs = build(&normalize(text));
+            assign_durations(&mut segs);
+            let i = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
+            aspiration_ms(&segs, i) > 0.0
+        };
+        for (text, ph) in [("a cap", Ph::K), ("a plan", Ph::P), ("atop", Ph::T)] {
+            assert!(aspirated(text, ph), "{text}");
+        }
+        for (text, ph) in [
+            ("kept moving", Ph::T),
+            ("help me", Ph::P),
+            ("cat lay", Ph::T),
+            ("back up", Ph::K),
+            ("Whitney", Ph::T),
+        ] {
+            assert!(!aspirated(text, ph), "{text}");
+        }
+    }
+
+    #[test]
+    fn microprosody_does_not_step_inside_continuous_voicing() {
+        for text in ["her hat", "the dog", "from there", "a city", "very good"] {
+            for scale in [1.0, 0.5, 0.38] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                scale_durations(&mut segs, scale);
+                let (starts, lens) = crate::params::frame_layout(&segs);
+                let mut f0 = vec![BASE_F0; lens.iter().sum()];
+                add_microprosody(&segs, &starts, &lens, 5.0, &mut f0);
+                // Voicing runs through sonorants, voiced consonants, flaps
+                // and this voice's /h/.
+                let voiced: Vec<bool> = (0..segs.len())
+                    .flat_map(|i| {
+                        let s = &segs[i];
+                        let v = s.flap || s.ph.is_some_and(|p| p.is_voiced() || p == Ph::HH);
+                        std::iter::repeat_n(v, lens[i])
+                    })
+                    .collect();
+                for k in 1..f0.len() {
+                    if voiced[k - 1] && voiced[k] {
+                        let step = (f0[k] / f0[k - 1] - 1.0).abs();
+                        assert!(step < 0.03, "{text}, scale {scale}, frame {k}: {f0:?}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn pitch_planning_can_stop_inside_a_single_clause() {

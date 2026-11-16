@@ -149,7 +149,7 @@ CMUdict is bundled as `data/cmudict/cmudict.dict` and is the single source of di
 | `tools/listen.py` | Rate- and loudness-matched blind A/B listening tests between two engines, with replay and a recorded manifest. Adapters in `tools/tts_engines.py` also support SAPI voices and eSpeak. |
 | `tools/voice_metrics.py` | Compares a rendering with a reference recording using rate-independent measures: pitch distribution, H1-H2, formants, pauses and spectral balance. |
 | `phones` | Prints each word's dictionary or letter-to-sound pronunciation, before connected-speech forms (`cargo run --release --example phones < text.txt`). |
-| `segdump` | Prints the segment timeline as spoken: phones, stress, flaps, durations and targets (`cargo run --release --example segdump -- text.txt`). |
+| `segdump` | Prints the segment timeline as spoken: phones, stress, flaps, durations and targets (`cargo run --release --example segdump -- text.txt`). With `--frames`, it prints each 5 ms frame instead: its segment and word, the voice-source parameters (AV, AH, OQ, TL, B1, F0), the rendered level, the formants and the noise and parallel amplitudes. |
 | `lts_accuracy` | Measures letter-to-sound agreement with CMUdict (`cargo run --release --example lts_accuracy`). |
 
 The Rust diagnostics live in `tools` and are built as Cargo examples, so they are not part of the CLI, DLL or add-on. Reference recordings are not included.

@@ -74,6 +74,14 @@ pub fn convert(source: &str) -> Result<String, String> {
                 index + 1
             ));
         }
+        // CMUdict gives the reduced [di] first for some words spelled -day,
+        // such as "Tuesday", "Monday" and "Saturday"; American dictionaries
+        // such as Merriam-Webster give [deɪ] first, as CMUdict itself does for
+        // "Sunday", "holiday" and "yesterday".
+        if word.ends_with("DAY") && phones.ends_with(&["D", "IY0"]) {
+            phones.pop();
+            phones.push("EY2");
+        }
         entries.entry(word).or_insert_with(|| phones.join(" "));
     }
     let mut out = String::new();
@@ -102,5 +110,14 @@ mod tests {
         for invalid in ["x B1", "x AE", "x AH21", "x AX0", "x UNKNOWN1", "empty"] {
             assert!(super::convert(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn words_spelled_day_end_in_a_full_day() {
+        let table = super::convert(
+            "saturday S AE1 T ER0 D IY0\nsaturday(2) S AE1 T IH2 D EY2\ncandy K AE1 N D IY0\n",
+        )
+        .unwrap();
+        assert_eq!(table, "CANDY K AE1 N D IY0\nSATURDAY S AE1 T ER0 D EY2\n");
     }
 }

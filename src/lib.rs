@@ -29,14 +29,13 @@ pub use stream::{CancelHandle, Rendered, Utterance, WordEvent};
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
 /// Leaves PCM headroom for the voicing-presence and consonant-noise boosts.
-const GAIN: f64 = 156_000.0;
+const GAIN: f64 = 97_000.0;
 /// Keeps extreme pitch and inflection settings above the range where pulses become clicks.
 const MIN_F0: f64 = 30.0;
 
-/// Klatter's natural speaking rate in long readings, including pauses: 220
-/// WPM averaged over two readings, raised 3.7% because weak forms, flaps and
-/// the retuned vowel durations shorten readings of *Alice* and
-/// *Sherlock Holmes* by that much.
+/// Klatter's natural speaking rate in long readings, including pauses,
+/// calibrated on *Alice's Adventures in Wonderland* so that a rate setting
+/// gives that many words per minute.
 pub const DEFAULT_WPM: f64 = 228.0;
 
 /// Speaking settings in physical units, so each host maps its own scales onto them.

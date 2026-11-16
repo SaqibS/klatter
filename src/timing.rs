@@ -29,6 +29,8 @@ const FRICATIVE_RELEASE_MS: f64 = 30.0;
 /// Between two vowels: Said a-i 100 ms, the same as a diphthong's interior
 /// transition (1991, Figs. 6-9, pp. 98-100).
 const VOWEL_VOWEL_MS: f64 = 100.0;
+/// A diphthong's interior transition, at the scale of the other transitions.
+pub const DIPHTHONG_GLIDE_MS: f64 = VOWEL_VOWEL_MS * TRANSITION_SCALE;
 /// Vowel into a liquid: [eyld] ey-l 80 ms (1991, Figs. 12-13, pp. 102-103).
 const VOWEL_LIQUID_MS: f64 = 80.0;
 /// Coda liquid into an obstruent: [eyld] l-d 20 ms (1991, Fig. 13, p. 103).
@@ -46,23 +48,17 @@ const GLIDE_VOWEL_MS: f64 = 100.0;
 const ASPIRATE_MS: f64 = 60.0;
 const CONSONANT_CONSONANT_MS: f64 = 20.0;
 /// A tap is a single ballistic flick of the tongue tip (Ladefoged & Maddieson
-/// 1996, ch. 7), so the vowels around it move only briefly:
-/// a flap interrupts them for about 35-40 ms in all.
+/// 1996, ch. 7) lasting only about 25 ms (Zue & Laferriere 1979), so the
+/// vowels around it move only briefly: its transitions are capped below the
+/// tap's own length.
 const FLAP_MS: f64 = 20.0;
 
-/// Transitions take about half the time of Hertz's careful
-/// single-speaker examples; with short, evenly timed vowels, full-length
-/// transitions leave vowels drifting toward their neighbours, and longer
-/// natural-rate transitions also dull the voice.
+/// Hertz's transition durations come from careful speech by a single
+/// speaker; Klatter's vowels are short and evenly timed, so at full length
+/// the transitions leave too little steady state and vowels drift toward
+/// their neighbours, and the voice is about 1 dB duller at 1-4 kHz. They are
+/// scaled by this factor.
 const TRANSITION_SCALE: f64 = 0.5;
-
-/// In fast speech, transitions shorten by `scale^FAST_RATE_EXPONENT` while
-/// spans shorten by `scale`. Hertz (1991, p. 106) observes that transitions
-/// and steady-state phones are not shortened by the same proportion in fast
-/// speech but gives no figures; with this exponent, transitions shrink faster
-/// than vowels, which keep their quality at high rates. In slower speech only the steady states stretch:
-/// transitions are stable when syllables are lengthened (1991, p. 94).
-const FAST_RATE_EXPONENT: f64 = 1.33;
 
 fn is_obstruent(p: Ph) -> bool {
     matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
@@ -153,12 +149,24 @@ fn share_before(segs: &[Seg], i: usize) -> f64 {
     }
 }
 
+/// How much transitions shrink at a duration `scale`. They are stable when
+/// syllables are lengthened, so only steady states stretch (Hertz 1991,
+/// p. 94). In fast speech they shrink in proportion with the phones: Hertz's
+/// fast [said] keeps its 30 ms transitions while the [a] shrinks (Figs.
+/// 16-17, pp. 105-106), but at screen-reader rates fixed transitions leave
+/// vowels little steady state and dull the voice (0.8 dB less energy at
+/// 1-4 kHz at 450 words per minute), and listeners preferred speech whose
+/// every part shrinks by the same proportion.
+fn rate_factor(scale: f64) -> f64 {
+    scale.min(1.0)
+}
+
 /// Transition duration (ms) between `i` and `i + 1` at a duration `scale`.
 fn transition_ms(segs: &[Seg], i: usize, scale: f64) -> f64 {
     if aspirated(segs, i) {
         segs[i + 1].aspiration_ms
     } else {
-        published_ms(segs, i) * TRANSITION_SCALE * scale.min(1.0).powf(FAST_RATE_EXPONENT)
+        published_ms(segs, i) * TRANSITION_SCALE * rate_factor(scale)
     }
 }
 
@@ -182,6 +190,7 @@ fn raw_parts(segs: &[Seg], scale: f64) -> Vec<(f64, f64)> {
 pub fn assign(segs: &mut [Seg], scale: f64) {
     let parts = raw_parts(segs, scale);
     for (s, (into, out)) in segs.iter_mut().zip(parts) {
+        s.glide_ms = DIPHTHONG_GLIDE_MS * rate_factor(scale);
         let available = (s.dur_ms - FRAME_MS).max(0.0);
         let k = if into + out > available {
             available / (into + out)
@@ -255,16 +264,12 @@ mod tests {
     }
 
     #[test]
-    fn fast_speech_shortens_transitions_more_than_phones_and_slow_speech_keeps_them() {
+    fn fast_speech_shrinks_transitions_with_phones_and_slow_speech_keeps_them() {
         let natural = timed("a bee", 1.0);
         let v = find(&natural, Ph::IY);
-        for scale in [0.5, 1.0 / 3.0] {
-            let fast = timed("a bee", scale);
-            assert!((fast[v].dur_ms - natural[v].dur_ms * scale).abs() < 1e-9);
-            let ratio = fast[v].trans_in_ms / natural[v].trans_in_ms;
-            assert!((ratio - scale.powf(FAST_RATE_EXPONENT)).abs() < 1e-9);
-            assert!(steady_ms(&fast[v]) > steady_ms(&natural[v]) * scale);
-        }
+        let fast = timed("a bee", 0.5);
+        assert!((fast[v].dur_ms - natural[v].dur_ms * 0.5).abs() < 1e-9);
+        assert!((fast[v].trans_in_ms - natural[v].trans_in_ms * 0.5).abs() < 1e-9);
         let slow = timed("a bee", 2.0);
         assert_eq!(slow[v].trans_in_ms, natural[v].trans_in_ms);
         assert!(steady_ms(&slow[v]) > 2.0 * steady_ms(&natural[v]));

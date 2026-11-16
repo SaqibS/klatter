@@ -10,11 +10,13 @@ const ASPIRATION_DB: f64 = 55.0;
 const VOICE_BAR_DB: f64 = 47.0;
 /// Keeps short frication and release cues prominent relative to vowels.
 const CONSONANT_NOISE_BOOST_DB: f64 = 6.0;
-/// /h/ is mostly voiced, with noise on top, rather than pure noise.
+/// /h/ is voiced with noise on top rather than pure noise: between voiced
+/// sounds English /h/ is usually breathy-voiced [ɦ] (Ladefoged & Johnson
+/// 2011), and listeners heard a noise-only /h/ as strange and breathy.
 const HH_AV_DB: f64 = 52.0;
 const HH_AH_DB: f64 = 55.0;
-/// Sounds change over about 25 ms; switching voicing or
-/// frication within one 5 ms frame sounds like clips spliced together.
+/// Voicing and frication change over about 25 ms; switching them within one
+/// 5 ms frame sounds like clips spliced together.
 const CROSS_FADE_FRAMES: usize = 5;
 /// Fades run from this inaudible level so they span only the audible range.
 const FADE_FLOOR_DB: f64 = 30.0;
@@ -26,12 +28,10 @@ const NASALIZE_AFTER_MS: f64 = 30.0;
 /// Affricates need most of their time as frication, or CH is heard as T.
 const AFFRICATE_RELEASE_SHARE: f64 = 0.65;
 
-/// KLGLOTT88 source settings for a male voice: modal phonation, then the fully
-/// breathy values (Klatt & Klatt 1990, Sec. III B and Table XII). The modal
-/// open quotient lies between 50% and 56%. Up to
-/// 56%, it leaves the source's energy above 500 Hz unchanged relative to its
-/// 250-500 Hz band.
-const MODAL_OQ: f64 = 54.0;
+/// KLGLOTT88 source settings for a male voice: modal phonation at the
+/// synthesizer's default open quotient, then the fully breathy values (Klatt &
+/// Klatt 1990, Table XII and Sec. III A).
+const MODAL_OQ: f64 = 50.0;
 const BREATHY_OQ: f64 = 80.0;
 const BREATHY_TL: f64 = 20.0;
 const BREATHY_AH: f64 = 52.0;
@@ -63,24 +63,25 @@ fn ms(x: f64) -> usize {
     (x / FRAME_MS).round() as usize
 }
 
-/// AY, AW and OY timing, with vowels measured from voicing onset to
-/// acoustic offset: the glide
-/// takes about 55 ms and reaches the offglide just before the consonant, and
-/// the onset vowel takes the rest (at least 30% of the vowel after the
-/// incoming transition). A long held offglide closes them early and leaves
-/// the open onset barely heard.
-const DIPHTHONG_GLIDE_MS: f64 = 55.0;
+/// AY, AW and OY are an onset vowel and an offglide joined by an interior
+/// transition (Hertz, Younes & Zinovieva 1999), timed like a vowel-vowel
+/// transition (Hertz 1991, Figs. 6-9) and stable before voiced and voiceless
+/// consonants alike: the onset vowel absorbs the change (pp. 99-100). The
+/// offglide holds for 10 ms before the next transition (Hertz & Huffman 1992,
+/// p. 1171). When the vowel is too short, the onset keeps a third of it and
+/// the glide keeps its slope and is cut off short of the offglide, as in
+/// Hertz's fast [said], whose [a] keeps 35 ms and whose interior transition
+/// stops after 70 of its 100 ms (1991, Fig. 17, p. 106). The glide's
+/// duration (`Seg::glide_ms`) shrinks with the other transitions in fast
+/// speech.
 const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
-const MIN_ONSET: f64 = 0.3;
-/// Glide (start, end) as fractions of a diphthong before a voiceless
-/// obstruent, where diphthongs are short and glide early.
-const CLIPPED_GLIDE: (f64, f64) = (0.25, 0.8);
+const MIN_ONSET: f64 = 1.0 / 3.0;
 /// Velar closures are made wherever the tongue body sits for the vowel, so
-/// the velar F2 locus follows the vowel's F2 (a locus equation) instead of
-/// one fixed value: near 2,100 Hz beside IY but 1,200 to 1,700 Hz beside
-/// back vowels.
-const VELAR_LOCUS_BASE_HZ: f64 = 680.0;
-const VELAR_LOCUS_SLOPE: f64 = 0.71;
+/// the velar F2 locus follows the vowel's F2 instead of one fixed value: the
+/// locus equation for /g/ onsets of Sussman, McCaffrey & Matthews' (1991,
+/// Table I) male talkers, F2 onset = 0.66 F2 vowel + 807 Hz.
+const VELAR_LOCUS_BASE_HZ: f64 = 807.0;
+const VELAR_LOCUS_SLOPE: f64 = 0.66;
 
 /// F2 locus of the velar stop at `i`, from the vowel it releases into, or
 /// else the vowel before it.
@@ -131,10 +132,6 @@ fn stop_f2_f3(segs: &[Seg], i: usize) -> Option<[f64; 2]> {
     })?;
     let locus = ph.spec().f;
     Some([1, 2].map(|j| lerp(locus[j], v[j], LOCUS_K)))
-}
-
-fn is_obstruent(p: Ph) -> bool {
-    matches!(p.class(), Class::Stop | Class::Affricate | Class::Fricative)
 }
 
 /// (frames before, frames after) each boundary: the transition between the
@@ -188,39 +185,31 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 
 /// Per-frame formant targets of a segment, before coarticulation. `incoming`
 /// frames at its start are covered by the transition from the segment
-/// before, and `clipped` marks a vowel before a voiceless obstruent.
-fn targets(ph: Ph, len: usize, incoming: usize, clipped: bool) -> Vec<Formants> {
+/// before, and a diphthong glides for `glide_ms`.
+fn targets(ph: Ph, len: usize, incoming: usize, glide_ms: f64) -> Vec<Formants> {
     let spec = ph.spec();
     let frames = |ms: f64| ms / FRAME_MS;
-    // Hertz, Younes & Zinovieva (1999): AY, AW and OY are vowel plus glide.
-    // The vowel holds its onset from the end of the transition into it
-    // and glides in a roughly fixed time just before the next consonant, so
-    // the open onset of "time" or "down" is heard. Before a voiceless
-    // obstruent the whole vowel is clipped and it glides from early on.
-    // EY and OW glide throughout.
+    // AY, AW and OY hold the onset vowel from the end of the transition into
+    // it and glide just before the next consonant, so the open onset of
+    // "time" or "down" is heard. EY and OW glide throughout.
     let settled = incoming.min(len / 2) as f64;
     let span = len as f64 - settled;
     let (glide_start, glide_len) = match ph {
-        Ph::AY | Ph::AW | Ph::OY if clipped => (
-            CLIPPED_GLIDE.0 * len as f64,
-            (CLIPPED_GLIDE.1 - CLIPPED_GLIDE.0) * len as f64,
-        ),
-        Ph::AY | Ph::AW | Ph::OY
-            if span >= frames(DIPHTHONG_GLIDE_MS + DIPHTHONG_OFFGLIDE_MS) + MIN_ONSET * span =>
-        {
-            let glide = frames(DIPHTHONG_GLIDE_MS);
-            (len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide, glide)
+        Ph::AY | Ph::AW | Ph::OY => {
+            let glide = frames(glide_ms);
+            let start = len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide;
+            (start.max(settled + MIN_ONSET * span), glide)
         }
-        Ph::AY | Ph::AW | Ph::OY => (settled + MIN_ONSET * span, 0.6 * span),
         _ => (0.25 * len as f64, 0.6 * len as f64),
     };
     (0..len)
         .map(|k| match spec.f_end {
             Some(end) => {
                 let t = ((k as f64 - glide_start) / glide_len.max(1.0)).clamp(0.0, 1.0);
+                let f = std::array::from_fn(|j| lerp(spec.f[j], end[j], t));
                 Formants {
-                    f: std::array::from_fn(|j| lerp(spec.f[j], end[j], t)),
-                    b: spec.b,
+                    f,
+                    b: crate::phoneme::vowel_bandwidths(f),
                 }
             }
             None => Formants {
@@ -279,11 +268,7 @@ fn formant_tracks(
             0
         };
         let incoming = if i > 0 { windows[i - 1].1 } else { 0 };
-        let clipped = segs
-            .get(i + 1)
-            .and_then(|s| s.ph)
-            .is_some_and(|p| is_obstruent(p) && !p.is_voiced());
-        let mut t = targets(ph, lens[i] - outgoing, incoming, clipped);
+        let mut t = targets(ph, lens[i] - outgoing, incoming, segs[i].glide_ms);
         t.resize(lens[i], *t.last().unwrap());
         if let Some(f2) = velar_f2_locus(segs, i) {
             for f in &mut t {
@@ -516,7 +501,8 @@ pub(crate) fn build_frames_cancellable(
                 for (k, fr) in frames[range].iter_mut().enumerate() {
                     if k < closure {
                         // Even voiceless closures carry a low murmur so
-                        // phrases flow without dead gaps.
+                        // phrases flow without dead gaps; listeners preferred
+                        // it to silent closures in blind comparison.
                         fr.avs = VOICE_BAR_DB;
                     } else {
                         fr.av = spec.av;
@@ -1054,7 +1040,7 @@ mod tests {
             let windows = transition_windows(&segs, &lens);
             let closure = starts[vowel] + lens[vowel] - windows[vowel].0;
             let offglide = closure - ms(DIPHTHONG_OFFGLIDE_MS);
-            let glide = offglide - ms(DIPHTHONG_GLIDE_MS);
+            let glide = offglide - ms(crate::timing::DIPHTHONG_GLIDE_MS);
             let spec = ph.spec();
             let target = spec.f_end.unwrap();
             // The onset is held from the end of the incoming transition.
@@ -1068,7 +1054,7 @@ mod tests {
                     lerp(
                         spec.f[j],
                         target[j],
-                        k as f64 / ms(DIPHTHONG_GLIDE_MS) as f64,
+                        k as f64 / ms(crate::timing::DIPHTHONG_GLIDE_MS) as f64,
                     )
                 });
                 assert_eq!(fr.f, expected, "{text}: glide frame {k}");
@@ -1081,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn diphthongs_glide_early_before_voiceless_obstruents() {
+    fn diphthong_onsets_absorb_clipping_before_voiceless_obstruents() {
         let onset_share = |text: &str| {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(Ph::AY)).unwrap();
@@ -1277,5 +1263,14 @@ mod tests {
         for w in f2.windows(2) {
             assert!((w[1] - w[0]).abs() < 300.0, "{f2:?}");
         }
+    }
+
+    #[test]
+    fn diphthong_bandwidths_follow_the_glide() {
+        let t = targets(Ph::AY, 40, 0, 100.0);
+        let (first, last) = (t[0], t[t.len() - 1]);
+        assert!(last.f[1] > first.f[1] + 500.0);
+        assert!(last.b[1] > first.b[1]);
+        assert_eq!(last.b, crate::phoneme::vowel_bandwidths(last.f));
     }
 }

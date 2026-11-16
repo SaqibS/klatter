@@ -30,17 +30,14 @@ const FT: f64 = 2150.0;
 const BT: f64 = 180.0;
 /// Frication-excited parallel bandwidths B2F..B6F.
 const PARALLEL_BW: [f64; 5] = [250.0, 320.0, 350.0, 500.0, 1500.0];
-/// Cascade formants above F3 at natural male spacing. F4 and F5 form a
-/// 3.6-3.9 kHz cluster in sustained vowels, with the valley below
-/// it. Poles up to and beyond the output band keep vowels' 3.5-5 kHz energy,
-/// which KLSYN88's 10 kHz-era F4/F5 alone lose at higher sample rates; the
-/// 4.7 kHz pole is broad so the cluster's upper skirt falls steeply.
-const CASCADE_HIGH: [(f64, f64); 4] = [
-    (3600.0, 300.0),
-    (3900.0, 200.0),
-    (4700.0, 1200.0),
-    (6000.0, 700.0),
-];
+/// Cascade formants above F3: KLSYN88's default F4, F5 and F6 with their
+/// default bandwidths (Klatt & Klatt 1990, Table XII), which give the energy
+/// concentration around 3-3.5 kHz and the falloff above about 4 kHz typical of
+/// male talkers (Klatt 1980). KLSYN88 ran at 10 kHz, so F6 sat at the top of its
+/// band; at higher output rates one more pole, at the seventh resonance of a
+/// uniform 17.5 cm male vocal tract (Fant 1960), stands in for the resonances
+/// above F6 so vowels keep their 5-7 kHz energy.
+const CASCADE_HIGH: [(f64, f64); 4] = [(F4, 200.0), (F5, 200.0), (F6, 500.0), (6500.0, 1000.0)];
 /// Aspiration keeps KLSYN88's F4/F5 instead: through CASCADE_HIGH it hisses.
 /// Zeros cancel CASCADE_HIGH on the
 /// noise path because those poles must come last: ahead of the nasal and F1-F3
@@ -254,11 +251,10 @@ impl Peaking {
 }
 
 /// Only voicing needs presence; aspiration and frication have their own shaping.
-/// Together with the vowels' sharp F2 and F3 peaks, it brightens voicing
-/// at 1-4 kHz, which listeners prefer.
+/// Listeners preferred voicing with this midrange presence in blind listening.
 const PRESENCE_HZ: f64 = 2200.0;
 const PRESENCE_OCTAVES: f64 = 1.7;
-const PRESENCE_DB: f64 = 4.0;
+const PRESENCE_DB: f64 = 5.0;
 
 /// Bandwidth of the 0 Hz low-pass resonator that attenuates by `tl` dB at
 /// 3 kHz; the paper defines TL by that attenuation.

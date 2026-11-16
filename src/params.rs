@@ -328,7 +328,13 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
     let next = segs.get(i + 1);
     let before_silence = segs.get(i + 1).is_none_or(|n| n.ph.is_none());
     let frames = |ms: f64| (ms * time_scale / FRAME_MS).max(1.0);
-    let margin = frames(VOICELESS_RAMP_MS).min((len as f64 * VOICELESS_MARGIN_SHARE).max(1.0));
+    // A breathy onset after a voiceless plosive starts where voicing does,
+    // after the aspiration.
+    let voicing = i
+        .checked_sub(1)
+        .map_or(0, |j| aspiration_frames(segs, j, len));
+    let voiced_len = (len - voicing) as f64;
+    let margin = frames(VOICELESS_RAMP_MS).min((voiced_len * VOICELESS_MARGIN_SHARE).max(1.0));
     let floor: f64 = if s.phrase_final { 0.25 } else { 0.0 };
     (0..len)
         .map(|k| {
@@ -342,7 +348,8 @@ fn breathiness(segs: &[Seg], i: usize, len: usize, time_scale: f64) -> Vec<(f64,
                 b = b.max(VOICELESS_PEAK * (1.0 - from_end / margin));
             }
             if is_voiceless(prev) {
-                b = b.max(VOICELESS_PEAK * (1.0 - (k + 1) as f64 / margin));
+                let from_onset = (k + 1).saturating_sub(voicing) as f64;
+                b = b.max(VOICELESS_PEAK * (1.0 - from_onset / margin));
             }
             (b.clamp(0.0, 1.0), offset)
         })
@@ -484,6 +491,7 @@ pub(crate) fn build_frames_cancellable(
         return None;
     }
 
+    let half = CROSS_FADE_FRAMES / 2;
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
     for i in 0..segs.len().saturating_sub(1) {
@@ -495,6 +503,20 @@ pub(crate) fn build_frames_cancellable(
             fr.av = 0.0;
             fr.ah = ASPIRATION_DB;
             fr.b[0] += 150.0;
+        }
+        if n == 0 {
+            continue;
+        }
+        // The folds adduct gradually after aspiration (Lofqvist & McGowan
+        // 1992), so voicing grows over the same cross-fade as other onsets
+        // rather than switching on at full strength.
+        let onset = starts[i + 1] + n;
+        let end = starts[i + 1] + lens[i + 1];
+        for (d, fr) in frames[onset..end].iter_mut().take(half).enumerate() {
+            if fr.av > 0.0 {
+                let voiced = (half + 1 + d) as f64 / CROSS_FADE_FRAMES as f64;
+                fr.av = lerp(FADE_FLOOR_DB, fr.av, voiced);
+            }
         }
     }
 
@@ -512,7 +534,6 @@ pub(crate) fn build_frames_cancellable(
             }
         }
     }
-    let half = CROSS_FADE_FRAMES / 2;
     for i in 0..segs.len() {
         if cancelled() {
             return None;
@@ -958,6 +979,19 @@ mod tests {
         let last = frames[starts[vowel] + lens[vowel] - 1];
         assert!(last.oq > mid.oq && last.tl > mid.tl && last.ah > mid.ah);
         assert!(last.av > 0.0);
+    }
+
+    #[test]
+    fn voicing_grows_breathily_after_aspiration() {
+        let (segs, starts, lens, frames) = frames_for("take a cup");
+        let i = segs.iter().position(|s| s.ph == Some(Ph::EY)).unwrap();
+        let vowel = &frames[starts[i]..starts[i] + lens[i]];
+        let onset = vowel.iter().position(|f| f.av > 0.0).unwrap();
+        assert!(onset > 0);
+        let av: Vec<f64> = vowel[onset..onset + 3].iter().map(|f| f.av).collect();
+        assert!(av[0] < av[1] && av[1] < av[2], "{av:?}");
+        assert_eq!(av[2], Ph::EY.spec().av);
+        assert!(vowel[onset].oq > vowel[onset + 3].oq && vowel[onset].ah > 0.0);
     }
 
     #[test]

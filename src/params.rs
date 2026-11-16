@@ -366,7 +366,7 @@ pub fn build_frames_with_layout(segs: &[Seg], starts: &[usize], lens: &[usize]) 
 }
 
 /// Pitch accents and breathiness ramps must follow the speaking-rate scale.
-pub(crate) fn build_frames_with_time_scale(
+pub fn build_frames_with_time_scale(
     segs: &[Seg],
     starts: &[usize],
     lens: &[usize],

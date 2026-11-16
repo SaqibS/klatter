@@ -11,9 +11,13 @@
 //! Usage:
 //!   cargo run --release --example segdump -- text.txt > segs.tsv
 //!   cargo run --release --example segdump -- text.txt SCALE out.wav > segs.tsv
+//!   cargo run --release --example segdump -- --frames text.txt [SCALE] > frames.tsv
 //!
 //! With SCALE, every duration is multiplied by it and the result is also
 //! rendered to out.wav (16 kHz), e.g. to match a reference speaking rate.
+//! With --frames, it prints one row per 5 ms frame instead: the segment, its
+//! stress and position, the voice-source parameters (AV, AH, OQ, TL, B1, F0)
+//! and the rendered level in dB.
 use klatter::*;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
@@ -98,8 +102,71 @@ fn run(input: &str, render: Option<(f64, &str)>) -> io::Result<()> {
     out.flush()
 }
 
+/// Per-frame source parameters and rendered level, at the natural rate or
+/// `scale` times its durations, with the segment each frame belongs to.
+fn run_frames(input: &str, scale: f64) -> io::Result<()> {
+    let text = std::fs::read_to_string(input)?;
+    let mut segs = utterance::build(&text::normalize(&text));
+    prosody::assign_durations(&mut segs);
+    prosody::scale_durations(&mut segs, scale);
+    let (starts, lens) = params::frame_layout(&segs);
+    let frames = params::build_frames_with_time_scale(&segs, &starts, &lens, scale);
+    let rate = DEFAULT_SAMPLE_RATE;
+    let audio = klatt::Synth::new(rate).render(&frames);
+    let mut out = BufWriter::new(io::stdout().lock());
+    writeln!(
+        out,
+        "seg\tph\tstress\tfn\tfinal\tk\tlen\tav\tah\toq\ttl\tb1\tf0\tdb"
+    )?;
+    for (i, seg) in segs.iter().enumerate() {
+        let name = seg.ph.map_or("_", |p| p.name());
+        for k in 0..lens[i] {
+            let frame = starts[i] + k;
+            let a = klatt::Synth::frame_start(frame, rate).min(audio.len());
+            let b = klatt::Synth::frame_start(frame + 1, rate).min(audio.len());
+            let power = audio[a..b].iter().map(|x| x * x).sum::<f64>() / (b - a).max(1) as f64;
+            let fr = &frames[frame];
+            writeln!(
+                out,
+                "{i}\t{name}\t{}\t{}\t{}\t{k}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.0}\t{:.1}\t{:.2}",
+                seg.stress,
+                seg.function_word as u8,
+                seg.phrase_final as u8,
+                lens[i],
+                fr.av,
+                fr.ah,
+                fr.oq,
+                fr.tl,
+                fr.b[0],
+                fr.f0,
+                10.0 * (power + 1e-12).log10(),
+            )?;
+        }
+    }
+    out.flush()
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--frames") {
+        let scale = args.get(2).and_then(|s| s.parse::<f64>().ok());
+        let (Some(input), Some(scale)) = (
+            args.get(1),
+            scale
+                .filter(|s| s.is_finite() && *s > 0.0 && args.len() <= 3)
+                .or((args.len() == 2).then_some(1.0)),
+        ) else {
+            eprintln!("usage: segdump --frames <text.txt> [SCALE]");
+            return ExitCode::from(2);
+        };
+        return match run_frames(input, scale) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("segdump: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let Some((input, render)) = parse_args(&args) else {
         eprintln!("usage: segdump <text.txt> [SCALE <out.wav>]");
         return ExitCode::from(2);

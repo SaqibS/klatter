@@ -109,6 +109,13 @@ const VOWEL_SHORTENING_AFTER_ASPIRATION_MS: f64 = 20.0;
 const STRESSED_VOWEL_FACTOR: f64 = 0.65;
 const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.8;
 const UNSTRESSED_WORD_FINAL_VOWEL_FACTOR: f64 = 1.5;
+/// A phrase-final syllable needs no help for audibility, except an unstressed
+/// vowel before a word-final nasal ("-tion", "button"): voicing runs on from
+/// the vowel into the murmur, so a short vowel merges with the nasal and the
+/// syllable is heard as a syllabic /n/ ("inflect'n"). Fitted to Eloquence's
+/// phrase-final "-tion", "-son" and "-en" vowels, about 85-110 ms at its
+/// natural rate.
+const UNSTRESSED_VOWEL_BEFORE_FINAL_NASAL_FACTOR: f64 = 2.6;
 
 /// Closures stay short, while fricatives need time to carry their noise cue.
 const STOP_FACTOR: f64 = 0.8;
@@ -192,6 +199,16 @@ pub fn assign_durations(segs: &mut [Seg]) {
                 } else {
                     UNSTRESSED_WORD_FINAL_VOWEL_FACTOR
                 };
+            }
+            let before_final_nasal = segs
+                .get(i + 1)
+                .is_some_and(|n| n.word_final && n.ph.is_some_and(|p| p.class() == Class::Nasal));
+            // After /t/ or /d/ the nasal is syllabic and the vowel all but
+            // absent ("button", "sudden"), as in Eloquence.
+            let syllabic_nasal = matches!(prev, Some(Ph::T | Ph::D));
+            if vowel && !s.function_word && s.phrase_final && before_final_nasal && !syllabic_nasal
+            {
+                prcnt *= UNSTRESSED_VOWEL_BEFORE_FINAL_NASAL_FACTOR;
             }
         }
         if vowel && stressed {
@@ -526,6 +543,33 @@ mod tests {
         segs.iter()
             .filter_map(|s| s.ph.map(|p| (p, s.dur_ms)))
             .collect()
+    }
+
+    fn last_vowel(text: &str) -> f64 {
+        durations(text)
+            .into_iter()
+            .rev()
+            .find(|(p, _)| p.is_vowel())
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn phrase_final_vowel_before_final_nasal_is_not_swallowed() {
+        // "-tion" at a phrase end is longer than mid-phrase, not shorter.
+        let mid = durations("inflection is odd")
+            .into_iter()
+            .filter(|(p, _)| p.is_vowel())
+            .nth(2)
+            .unwrap()
+            .1;
+        let end = last_vowel("inflection");
+        assert!(end > mid * 1.5, "end {end} mid {mid}");
+        assert!(last_vowel("lesson") > 100.0);
+        // After /t/ or /d/ the nasal is syllabic and the vowel stays short.
+        assert!(last_vowel("button") < last_vowel("lesson") * 0.6);
+        // Open final syllables are untouched.
+        assert!(last_vowel("happy") < 130.0);
     }
 
     #[test]

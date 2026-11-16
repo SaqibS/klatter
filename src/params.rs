@@ -649,6 +649,58 @@ fn cross_fade(segs: &[Seg], starts: &[usize], lens: &[usize], frames: &mut [Fram
             frames[k].a = frames[source].a;
         }
     }
+    fade_affricate_offsets(segs, starts, lens, frames);
+}
+
+/// An affricate's frication starts abruptly, which is the cue that separates
+/// it from a fricative, but it should not stop abruptly: cutting full-level
+/// noise within one frame clicks, most audibly before silence ("which").
+/// The second half of the release and the frames after it get the same
+/// moving average as fricative noise; the onset half is left untouched.
+fn fade_affricate_offsets(segs: &[Seg], starts: &[usize], lens: &[usize], frames: &mut [Frame]) {
+    let half = CROSS_FADE_FRAMES / 2;
+    for i in 0..segs.len() {
+        if !segs[i].ph.is_some_and(|p| p.class() == Class::Affricate) {
+            continue;
+        }
+        let (start, end) = (starts[i], starts[i] + lens[i]);
+        let Some(release) = (start..end).find(|&k| frames[k].af > 0.0) else {
+            continue;
+        };
+        let source = end - 1;
+        let level = |k: usize| {
+            if k < end {
+                frames[k].af.max(FADE_FLOOR_DB)
+            } else {
+                FADE_FLOOR_DB
+            }
+        };
+        let from = release + (end - release) / 2;
+        let to = (end + half).min(frames.len());
+        let faded: Vec<f64> = (from..to)
+            .map(|k| {
+                let window = k.saturating_sub(half)..k + half + 1;
+                let mean = window.clone().map(level).sum::<f64>() / window.len() as f64;
+                if mean > FADE_FLOOR_DB + 0.5 {
+                    mean
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let (ab, a) = (frames[source].ab, frames[source].a);
+        for (k, af) in (from..to).zip(faded) {
+            if k >= end && frames[k].af > 0.0 {
+                // A following fricative keeps its own noise.
+                continue;
+            }
+            frames[k].af = af;
+            if k >= end {
+                frames[k].ab = ab;
+                frames[k].a = a;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -685,6 +737,30 @@ mod tests {
     }
 
     #[test]
+    fn affricate_noise_starts_sharply_and_fades_out() {
+        for text in ["which", "pitch it", "judge"] {
+            let (segs, starts, lens, frames) = frames_for(text);
+            let i = segs
+                .iter()
+                .position(|s| s.ph.is_some_and(|p| p.class() == Class::Affricate))
+                .unwrap();
+            let (start, end) = (starts[i], starts[i] + lens[i]);
+            let release = (start..end).find(|&k| frames[k].af > 0.0).unwrap();
+            assert_eq!(frames[release - 1].af, 0.0, "{text}: onset stays abrupt");
+            let level = |k: usize| frames.get(k).map_or(0.0, |f| f.af).max(FADE_FLOOR_DB);
+            for k in release + 1..(end + CROSS_FADE_FRAMES).min(frames.len() + 1) {
+                let step = level(k - 1) - level(k);
+                assert!(
+                    step < 15.0,
+                    "{text} frame {k}: {} -> {}",
+                    level(k - 1),
+                    level(k)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn consonant_noise_boost_preserves_stop_closure_and_release_spectra() {
         for (text, ph) in [("at", Ph::T), ("pitch", Ph::CH)] {
             let (segs, starts, lens, frames) = frames_for(text);
@@ -694,8 +770,14 @@ mod tests {
             assert!(release > 0, "{text}");
             assert!(phone[..release].iter().all(|fr| fr.af == 0.0));
             let spec = ph.spec();
+            // An affricate's release fades out over its second half.
+            let held = if ph == Ph::CH {
+                release + (phone.len() - release) / 2
+            } else {
+                phone.len()
+            };
             assert!(
-                phone[release..]
+                phone[release..held]
                     .iter()
                     .all(|fr| { fr.af == spec.af + 6.0 && fr.ab == spec.ab && fr.a == spec.a }),
                 "{text}"

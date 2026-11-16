@@ -86,6 +86,7 @@ Functions return null or a negative status for invalid input and never unwind a 
 | Hertz (1991), *Streams, phones and transitions: toward a new phonological and phonetic model of formant timing*, Journal of Phonetics 19, 91-109 | The phone-and-transition timing model: formant transitions as timed units of their own between phones, with durations that depend on the two phones (stop, fricative, vowel, liquid and offglide joins); transitions that stay stable when syllables are lengthened, so only steady states stretch; aspiration spanning the release transition; and transitions that shorten in fast speech in a different proportion from phones. |
 | [Hertz & Huffman (1992), *A nucleus-based timing model applied to multi-dialect speech synthesis by rule*](https://www.isca-archive.org/icslp_1992/hertz92_icslp.pdf) | Timing a vowel and its following liquids and glides as one nucleus, in which the vowel takes whatever time the transitions and other phones leave, and shortening the voiced vowel after aspiration. |
 | [Hertz, Younes & Zinovieva (1999), *Language-universal and language-specific components in the multi-language ETI-Eloquence text-to-speech system*](https://www.synfonicaspeech.com/pdf/ICPhS99.pdf) | Phones joined by explicit transitions, example transition timings, voicing and aspiration aligned with phone and transition edges, diphthong glide timing, and accent-peak placement. This is the published description of Eloquence's own design. |
+| Fry (1955), *Duration and intensity as physical correlates of linguistic stress*, JASA 27(4), 765-768; Lehiste (1970), *Suprasegmentals* | Greater intensity as a correlate of stress. |
 | Ladefoged & Johnson (2011), *A Course in Phonetics*, 6th ed. | American English connected speech: weak forms of function words, and flapping of /t/ and /d/ between a vowel and an unstressed vowel. |
 | Zue & Laferriere (1979), *Acoustic study of medial /t,d/ in American English*, JASA 66(4), 1039-1050 | Flaps as brief voiced taps without a release burst. |
 | Ladefoged & Maddieson (1996), *The Sounds of the World's Languages* | Taps and flaps as a single ballistic movement of the tongue tip. |
@@ -105,10 +106,11 @@ Some values were fitted to measurements of Eloquence's output instead of taken f
 - **Velar loci.** /k/ and /g/ take their F2 locus from the neighbouring vowel, following a locus equation fitted to Eloquence's onsets.
 - **Brighter voicing.** A gentle presence boost on voicing only, and fixed upper formants placed to keep energy at 3.5-5 kHz, give Klatter more high-frequency clarity than Eloquence's 11 kHz output.
 
-Where the papers' findings differ by talker, Klatter follows the data for male talkers, since its voice is male:
+Klatter's voice is male, so its voice-quality and stress-intensity rules follow Klatt & Klatt's (1990) measurements of male talkers, which in places differ from their summary across all talkers:
 
 - **Modal unstressed syllables.** Klatt & Klatt (1990) summarize breathiness as greater in unstressed syllables, but their male talkers' first harmonic at mid-vowel was no stronger in unstressed syllables (Table II) and their vowels carried little aspiration noise (Tables V and VI). Klatter keeps unstressed syllables modal and, as in Klatt's (1987) rules, reserves breathiness for phrase-final syllables, offsets into silence and the margins of voiceless consonants.
 - **Short voiceless margins.** The breathy margins beside voiceless consonants follow the 80 ms ramps of Klatt & Klatt's Figs. 15 and 16 but stay within the outer third of a sonorant, because their Table II shows that even [h] does not make the middle of the vowel breathier.
+- **Weaker unstressed vowels.** Stressed syllables are more intense (Fry 1955; Lehiste 1970), by 4.3 dB for Klatt & Klatt's male talkers, partly through their higher F0. Klatt (1987) warned that a large stress-intensity rule makes stressed vowels sound artificially strong, so Klatter voices unstressed vowels 3 dB more weakly, which with the pitch contour gives stressed vowels about 3.5 dB more intensity than the same vowel unstressed.
 
 ### Pipeline
 

@@ -51,6 +51,13 @@ const VOICELESS_PEAK: f64 = 0.8;
 /// opening does not reach the middle of the vowel. So the breathy margins of
 /// voiceless consonants stay within this share of a sonorant at each end.
 const VOICELESS_MARGIN_SHARE: f64 = 1.0 / 3.0;
+/// Stressed syllables are spoken with more vocal effort and are more intense
+/// (Fry 1955; Lehiste 1970). Klatt & Klatt's (1990) male talkers' stressed
+/// syllables were 4.3 dB more intense at mid-vowel, partly from their higher
+/// F0, which the pitch contour already supplies. Klatt (1987) found a large
+/// stress-intensity rule makes stressed vowels sound artificially strong, so
+/// the rest of the difference is taken from unstressed vowels, modestly.
+const UNSTRESSED_AV_DROP_DB: f64 = 3.0;
 
 fn ms(x: f64) -> usize {
     (x / FRAME_MS).round() as usize
@@ -410,8 +417,15 @@ pub(crate) fn build_frames_cancellable(
         let len = lens[i];
         match ph.class() {
             Class::Vowel | Class::Liquid | Class::Glide | Class::Nasal => {
+                let unstressed = ph.is_vowel() && (segs[i].stress == 0 || segs[i].function_word);
+                let av = spec.av
+                    - if unstressed {
+                        UNSTRESSED_AV_DROP_DB
+                    } else {
+                        0.0
+                    };
                 for fr in &mut frames[range] {
-                    fr.av = spec.av;
+                    fr.av = av;
                     if ph.class() == Class::Nasal {
                         fr.fnz = NASAL_ZERO_HZ;
                     }
@@ -966,6 +980,20 @@ mod tests {
         assert_eq!(segs[vowel].stress, 0);
         let mid = frames[starts[vowel] + lens[vowel] / 2];
         assert_eq!((mid.oq, mid.tl, mid.ah), (MODAL_OQ, 0.0, 0.0));
+    }
+
+    #[test]
+    fn unstressed_vowels_are_voiced_more_weakly_than_stressed_ones() {
+        let (segs, starts, lens, frames) = frames_for("banana bread");
+        let mid_av = |i: usize| frames[starts[i] + lens[i] / 2].av;
+        let vowels: Vec<usize> = (0..segs.len())
+            .filter(|&i| segs[i].ph.is_some_and(Ph::is_vowel))
+            .collect();
+        let (weak, strong) = (vowels[0], vowels[1]);
+        assert_eq!(segs[strong].stress, 1);
+        let spec = |i: usize| segs[i].ph.unwrap().spec().av;
+        assert_eq!(mid_av(weak), spec(weak) - UNSTRESSED_AV_DROP_DB);
+        assert_eq!(mid_av(strong), spec(strong));
     }
 
     #[test]

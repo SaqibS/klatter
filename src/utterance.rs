@@ -93,6 +93,9 @@ fn word_pronunciation(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(P
     if let Some(entry) = lexicon::known_phones(word, overrides) {
         return entry;
     }
+    if let Some(phones) = prefixed_known_word(word, overrides) {
+        return phones;
+    }
     let split = match word.strip_suffix("'S").filter(|b| !b.is_empty()) {
         Some(base) => Some((base.to_string(), Suffix::S)),
         None => morph::split(word),
@@ -117,6 +120,34 @@ fn word_pronunciation(word: &str, overrides: &lexicon::Pronunciations) -> Vec<(P
     let letters: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect();
     let phones = lts::letters_to_phonemes(word);
     lts::assign_stress(&letters, &phones)
+}
+
+/// Productive unstressed prefixes. Words like "untitled" are missing from the
+/// dictionary even when the word after the prefix is in it, and stripping a
+/// suffix first would leave a non-word root ("untitl") for letter-to-sound.
+const UNSTRESSED_WORD_PREFIXES: &[(&str, &[(Ph, u8)])] = {
+    use Ph::*;
+    &[
+        ("UN", &[(AX, 0), (N, 0)]),
+        ("RE", &[(R, 0), (IY, 0)]),
+        ("DIS", &[(D, 0), (IH, 0), (S, 0)]),
+        ("MIS", &[(M, 0), (IH, 0), (S, 0)]),
+    ]
+};
+
+fn prefixed_known_word(word: &str, overrides: &lexicon::Pronunciations) -> Option<Vec<(Ph, u8)>> {
+    UNSTRESSED_WORD_PREFIXES
+        .iter()
+        .find_map(|(prefix, phones)| {
+            let rest = word.strip_prefix(prefix).filter(|r| r.len() >= 4)?;
+            let rest_phones = lexicon::known_phones(rest, overrides)?;
+            // A stressless remainder is a function word or a fragment, not a root.
+            rest_phones.iter().any(|p| p.1 == 1).then(|| {
+                let mut all = phones.to_vec();
+                all.extend(rest_phones);
+                all
+            })
+        })
 }
 
 /// American weak forms of function words (Ladefoged & Johnson 2011, ch. 5),
@@ -458,6 +489,18 @@ mod tests {
             pronounce("XYZZYFUL"),
             lts::assign_stress("XYZZYFUL", &lts::letters_to_phonemes("XYZZYFUL"))
         );
+    }
+
+    #[test]
+    fn unstressed_prefix_keeps_the_known_word_after_it() {
+        use Ph::*;
+        let titled = lexicon::cmudict_phones("TITLED").unwrap();
+        let mut untitled = vec![(AX, 0), (N, 0)];
+        untitled.extend(titled.iter().copied());
+        assert_eq!(pronounce("UNTITLED"), untitled);
+        let mut retitled = vec![(R, 0), (IY, 0)];
+        retitled.extend(titled);
+        assert_eq!(pronounce("RETITLED"), retitled);
     }
 
     #[test]

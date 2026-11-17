@@ -13,7 +13,7 @@
 //!   cargo run --release --example segdump -- --frames text.txt [SCALE] > frames.tsv
 //!
 //! With SCALE, every duration is multiplied by it and the result is also
-//! rendered to out.wav (16 kHz), e.g. to match a reference speaking rate.
+//! rendered to out.wav (16 kHz), e.g. to inspect timing at a faster rate.
 //! With --frames, it prints one row per 5 ms frame instead: the segment, its
 //! stress, position, word and timing, the voice-source parameters (AV, AH,
 //! OQ, TL, B1, F0), the rendered level in dB, then the formants and the

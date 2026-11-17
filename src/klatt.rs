@@ -57,7 +57,8 @@ const CASCADE_GAIN: f64 = 1.0;
 const GLOTTAL_PEAK: f64 = 0.75;
 const REFERENCE_PERIOD_S: f64 = 0.01;
 const PARALLEL_GAIN: f64 = 0.035;
-/// Balances aspiration with the stronger voicing and consonant-noise cues.
+/// Aspiration at the AV level matches the high harmonics of default voicing,
+/// the KLSYN88 calibration, with the voicing's presence boost included.
 const ASPIRATION_GAIN: f64 = 0.0192;
 const VOICE_BAR_GAIN: f64 = 1.0;
 
@@ -251,7 +252,8 @@ impl Peaking {
 }
 
 /// Only voicing needs presence; aspiration and frication have their own shaping.
-/// Listeners preferred voicing with this midrange presence in blind listening.
+/// KLSYN88 has no such filter; a listener preferred voicing with this midrange
+/// presence in blind listening.
 const PRESENCE_HZ: f64 = 2200.0;
 const PRESENCE_OCTAVES: f64 = 1.7;
 const PRESENCE_DB: f64 = 5.0;
@@ -411,7 +413,7 @@ impl GlottalSource {
 /// difference follows. Klatt's (1980) low-pass is an integrator that the
 /// radiation exactly cancels, leaving flat noise; this pole of 0.75 leaves a
 /// high-pass shelf instead (about 8 dB down at 300 Hz relative to 4 kHz),
-/// with which the consonant and aspiration levels were set.
+/// with which Klatter's consonant and aspiration levels are set.
 struct NoiseSource {
     rng: u32,
     lp: f64,

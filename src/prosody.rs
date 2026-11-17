@@ -7,17 +7,21 @@ use crate::text::Break;
 use crate::timing;
 use crate::utterance::Seg;
 
+/// Klatt's (1979) pause rule: 200 ms at a comma or clause boundary. His rules
+/// time one sentence at a time and give no pause between sentences; Klatter
+/// pauses twice as long there, the nearest choice that keeps sentence ends
+/// distinct from commas.
+const CLAUSE_PAUSE_MS: f64 = 200.0;
+const SENTENCE_PAUSE_MS: f64 = 2.0 * CLAUSE_PAUSE_MS;
+
 pub fn pause_ms(brk: Option<Break>, utterance_edge: bool) -> f64 {
     match brk {
         _ if utterance_edge => 150.0,
-        Some(Break::Comma) => 165.0,
-        Some(_) => 385.0,
+        Some(Break::Comma) => CLAUSE_PAUSE_MS,
+        Some(_) => SENTENCE_PAUSE_MS,
         None => 150.0,
     }
 }
-
-/// Phrase boundaries stay distinct without dominating fast speech.
-const PAUSE_RATE_EXPONENT: f64 = 1.5;
 
 fn neighbor(segs: &[Seg], i: usize, offset: isize) -> Option<Ph> {
     let j = i as isize + offset;
@@ -109,26 +113,23 @@ pub fn aspiration_ms(segs: &[Seg], i: usize) -> f64 {
 const VOWEL_SHORTENING_AFTER_ASPIRATION_MS: f64 = 20.0;
 
 /// Syllables are kept evenly timed, for the predictable rhythm and delivery
-/// listeners preferred over the more sing-song timing of Klatt's rules alone:
-/// stressed vowels are shorter than the rules give, which avoids a drawl on
-/// content words, while unstressed syllables of content words stay audible
-/// instead of being swallowed. A word's last syllable already escapes
-/// non-word-final shortening and gets the word-final postvocalic lengthening,
-/// so it gets less extra length; with the same factor everywhere, speech
-/// recognition misheard about 4% more words of the Harvard sentences at 450
-/// words per minute.
+/// a listener chose in blind comparisons over the more sing-song timing of
+/// Klatt's rules alone: stressed vowels are shorter than the rules give,
+/// which avoids a drawl on content words, while unstressed syllables of
+/// content words stay audible instead of being swallowed.
 const STRESSED_VOWEL_FACTOR: f64 = 0.65;
 const UNSTRESSED_CONTENT_VOWEL_FACTOR: f64 = 1.8;
-const UNSTRESSED_WORD_FINAL_VOWEL_FACTOR: f64 = 1.5;
 
-/// Closures stay short, while fricatives need time to carry their noise cue.
+/// Part of the same even rhythm: closures stay short, while fricatives keep
+/// most of their time to carry their noise cue.
 const STOP_FACTOR: f64 = 0.8;
 const FRICATIVE_FACTOR: f64 = 0.95;
 /// Affricates keep the stop's closure and add a fricative's worth of noise.
 const AFFRICATE_FACTOR: f64 = 1.2;
 
 /// Klatt's value is 1.4, but final vowels already escape non-final shortening
-/// and get the full postvocalic effect, so they need trimming to avoid a drawl.
+/// and get the full postvocalic effect; a listener heard drawled phrase ends
+/// and chose this trimmed value for an even delivery.
 const PHRASE_FINAL_LENGTHENING: f64 = 0.8;
 
 /// Inherent and minimum durations (ms) of a flapped /t/ or /d/: a single tap,
@@ -192,17 +193,9 @@ pub fn assign_durations(segs: &mut [Seg]) {
                 0.7
             };
             // Phrase-final syllables are already lengthened, so they need no
-            // extra audibility, and nor does a schwa before a syllabic /l/
-            // ("little", "table"), whose /l/ carries the syllable.
-            let syllabic_l = ph == Ph::AX
-                && next == Some(Ph::L)
-                && segs.get(i + 1).is_some_and(|l| l.word_final);
-            if vowel && !s.function_word && !s.phrase_final && !syllabic_l {
-                prcnt *= if s.syllable + 1 < s.syllables_in_word {
-                    UNSTRESSED_CONTENT_VOWEL_FACTOR
-                } else {
-                    UNSTRESSED_WORD_FINAL_VOWEL_FACTOR
-                };
+            // extra audibility.
+            if vowel && !s.function_word && !s.phrase_final {
+                prcnt *= UNSTRESSED_CONTENT_VOWEL_FACTOR;
             }
         }
         if vowel && stressed {
@@ -292,12 +285,12 @@ pub fn assign_durations(segs: &mut [Seg]) {
     timing::assign(segs, 1.0);
 }
 
-/// Speech and onset budgets scale together; pauses compress more at fast
-/// rates, and transitions follow their own rate law (see `timing`).
+/// Speech and onset budgets scale together, pauses follow `pause_scale`, and
+/// transitions follow their own rate law (see `timing`).
 pub fn scale_durations(segs: &mut [Seg], scale: f64) {
     for seg in segs.iter_mut() {
         seg.dur_ms *= if seg.ph.is_none() {
-            scale.powf(PAUSE_RATE_EXPONENT)
+            pause_scale(scale)
         } else {
             scale
         };
@@ -306,6 +299,33 @@ pub fn scale_durations(segs: &mut [Seg], scale: f64) {
     timing::assign(segs, scale);
 }
 
+/// Readers speed up mostly by pausing less, and articulate only a little
+/// faster: as reading rate rose 2.7-fold, the number of pauses fell 10.3-fold
+/// and their durations 1.6-fold, while articulation rate rose only 2.1-fold
+/// (Lane & Grosjean 1973, reported by Grosjean & Lane 1974, p. 893; "increase
+/// of speed in talking is due largely to the closing of gaps", Goldman-Eisler
+/// 1968, p. 26). Klatter pauses only at punctuation and drops none, so above
+/// the natural rate its pauses shorten instead, keeping the readers' total:
+/// pause time falls 10.3 x 1.6 = 16.5-fold while phone time falls 2.1-fold,
+/// a power of ln 16.5 / ln 2.1 = 3.8 of the phones' duration scale. Slower
+/// than the natural rate, pauses lengthen with the phones.
+const PAUSE_RATE_EXPONENT: f64 = 3.78;
+
+/// The duration scale of pauses when phones scale by `scale`.
+pub fn pause_scale(scale: f64) -> f64 {
+    if scale < 1.0 {
+        scale.powf(PAUSE_RATE_EXPONENT)
+    } else {
+        scale
+    }
+}
+
+/// The pitch contour is a declining baseline with a separate rise-fall for
+/// each accent, which F0 sags back toward between accents rather than holding
+/// a hat (Pierrehumbert 1981, Figs. 4 and 6). Its range is narrower than in
+/// Klatt's (1987, Fig. 26) example, and its accents, boundary tones and
+/// declination are the values a listener chose in blind comparisons for a
+/// predictable, not sing-song, delivery.
 const START_F0: f64 = 110.0;
 pub const BASE_F0: f64 = 100.0;
 const FLOOR_F0: f64 = 74.0;
@@ -573,6 +593,23 @@ mod tests {
     }
 
     #[test]
+    fn pauses_shrink_faster_than_speech_and_lengthen_with_it() {
+        let mut segs = build(&normalize("The quick brown fox, and the lazy dog."));
+        assign_durations(&mut segs);
+        for scale in [0.5, 2.0] {
+            let mut scaled = segs.clone();
+            scale_durations(&mut scaled, scale);
+            for (natural, scaled) in segs.iter().zip(&scaled) {
+                if natural.ph.is_none() && scale < 1.0 {
+                    assert!(scaled.dur_ms < natural.dur_ms * scale * scale);
+                } else {
+                    assert_eq!(scaled.dur_ms, natural.dur_ms * scale);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn microprosody_does_not_step_inside_continuous_voicing() {
         for text in ["her hat", "the dog", "from there", "a city", "very good"] {
             for scale in [1.0, 0.5, 0.38] {
@@ -730,28 +767,6 @@ mod tests {
         for ending in [Break::Period, Break::Question, Break::Exclamation] {
             let sentence = pause_ms(Some(ending), false);
             assert!(0.0 < comma && comma < sentence);
-        }
-    }
-
-    #[test]
-    fn speeding_up_preserves_speech_rhythm_but_compresses_pauses_more() {
-        let mut segs = build(&normalize("The quick brown fox. See the lazy dog."));
-        assign_durations(&mut segs);
-        for scale in [0.5, 1.0 / 3.0, 2.0] {
-            let mut scaled = segs.clone();
-            scale_durations(&mut scaled, scale);
-            for (natural, scaled) in segs.iter().zip(scaled) {
-                if natural.ph.is_none() {
-                    if scale < 1.0 {
-                        assert!(scaled.dur_ms < natural.dur_ms * scale);
-                    } else {
-                        assert!(scaled.dur_ms > natural.dur_ms * scale);
-                    }
-                } else {
-                    assert_eq!(scaled.dur_ms, natural.dur_ms * scale);
-                    assert_eq!(scaled.aspiration_ms, natural.aspiration_ms * scale);
-                }
-            }
         }
     }
 

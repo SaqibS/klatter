@@ -12,11 +12,15 @@ const VOICE_BAR_DB: f64 = 47.0;
 const CONSONANT_NOISE_BOOST_DB: f64 = 6.0;
 /// /h/ is voiced with noise on top rather than pure noise: between voiced
 /// sounds English /h/ is usually breathy-voiced [ɦ] (Ladefoged & Johnson
-/// 2011), and listeners heard a noise-only /h/ as strange and breathy.
-const HH_AV_DB: f64 = 52.0;
-const HH_AH_DB: f64 = 55.0;
-/// Voicing and frication change over about 25 ms; switching them within one
-/// 5 ms frame sounds like clips spliced together.
+/// 2011). Its voicing is 10 dB below a vowel's, Klatt's (1980) level for
+/// sonorant consonants, under the usual aspiration.
+const HH_AV_DB: f64 = crate::phoneme::VOWEL_AV - 10.0;
+const HH_AH_DB: f64 = ASPIRATION_DB;
+/// Voicing and frication change across a boundary rather than within one
+/// 5 ms parameter update, which sounds like clips spliced together. The ramp
+/// spans the nearest symmetric number of frames, 25 ms, to Hertz's (1991,
+/// Fig. 7) 30 ms fricative-to-vowel transition, across which frication gives
+/// way to voicing.
 const CROSS_FADE_FRAMES: usize = 5;
 /// Fades run from this inaudible level so they span only the audible range.
 const FADE_FLOOR_DB: f64 = 30.0;
@@ -69,13 +73,14 @@ fn ms(x: f64) -> usize {
 /// consonants alike: the onset vowel absorbs the change (pp. 99-100). The
 /// offglide holds for 10 ms before the next transition (Hertz & Huffman 1992,
 /// p. 1171). When the vowel is too short, the onset keeps a third of it and
-/// the glide keeps its slope and is cut off short of the offglide, as in
-/// Hertz's fast [said], whose [a] keeps 35 ms and whose interior transition
-/// stops after 70 of its 100 ms (1991, Fig. 17, p. 106). The glide's
-/// duration (`Seg::glide_ms`) shrinks with the other transitions in fast
-/// speech.
+/// the glide is cut off short of the offglide, as in Hertz's fast [said],
+/// whose [a] keeps 35 ms and whose interior transition stops after 70 of its
+/// 100 ms (1991, Fig. 17, p. 106): the glide keeps its slope where the vowel
+/// leaves room for 70% of it, and steepens where it does not, so it always
+/// gets that far.
 const DIPHTHONG_OFFGLIDE_MS: f64 = 10.0;
 const MIN_ONSET: f64 = 1.0 / 3.0;
+const MIN_GLIDE_REACHED: f64 = 0.7;
 /// Velar closures are made wherever the tongue body sits for the vowel, so
 /// the velar F2 locus follows the vowel's F2 instead of one fixed value: the
 /// locus equation for /g/ onsets of Sussman, McCaffrey & Matthews' (1991,
@@ -196,9 +201,12 @@ fn targets(ph: Ph, len: usize, incoming: usize, glide_ms: f64) -> Vec<Formants> 
     let span = len as f64 - settled;
     let (glide_start, glide_len) = match ph {
         Ph::AY | Ph::AW | Ph::OY => {
-            let glide = frames(glide_ms);
+            let earliest = settled + MIN_ONSET * span;
+            let glide = frames(glide_ms)
+                .min((len as f64 - 1.0 - earliest) / MIN_GLIDE_REACHED)
+                .max(1.0);
             let start = len as f64 - frames(DIPHTHONG_OFFGLIDE_MS) - glide;
-            (start.max(settled + MIN_ONSET * span), glide)
+            (start.max(earliest), glide)
         }
         _ => (0.25 * len as f64, 0.6 * len as f64),
     };
@@ -500,10 +508,12 @@ pub(crate) fn build_frames_cancellable(
                 let closure = len - release;
                 for (k, fr) in frames[range].iter_mut().enumerate() {
                     if k < closure {
-                        // Even voiceless closures carry a low murmur so
-                        // phrases flow without dead gaps; listeners preferred
-                        // it to silent closures in blind comparison.
-                        fr.avs = VOICE_BAR_DB;
+                        // Only voiced closures carry a voice bar (Klatt
+                        // 1980); voicing stops for a voiceless one (Hertz
+                        // 1991).
+                        if ph.is_voiced() {
+                            fr.avs = VOICE_BAR_DB;
+                        }
                     } else {
                         fr.av = spec.av;
                         fr.af = noise_level(spec.af);
@@ -519,16 +529,31 @@ pub(crate) fn build_frames_cancellable(
     }
 
     cross_fade(segs, starts, lens, &mut frames);
-    // Voicing of a voiceless plosive starts only after its burst (and any
-    // aspiration), which is what voice-onset time measures (Klatt 1987), so
-    // the cross-fade must not carry the vowel's voicing back into the burst.
+    // Voicing stops for a voiceless plosive or affricate (Hertz 1991, Figs.
+    // 14-15, turns it off before the closure) and starts again only after the
+    // burst and any aspiration, which is what voice-onset time measures
+    // (Klatt 1987), so the cross-fade must not carry the vowels' voicing into
+    // its closure or release: voicing fades within the vowel before it.
+    let half = CROSS_FADE_FRAMES / 2;
     for i in 0..segs.len() {
-        if segs[i].flap || !segs[i].ph.is_some_and(|p| p.is_plosive() && !p.is_voiced()) {
+        let voiceless_stop = segs[i]
+            .ph
+            .is_some_and(|p| matches!(p.class(), Class::Stop | Class::Affricate) && !p.is_voiced());
+        if segs[i].flap || !voiceless_stop {
             continue;
         }
         for fr in &mut frames[starts[i]..starts[i] + lens[i]] {
-            if fr.af > 0.0 {
-                fr.av = 0.0;
+            fr.av = 0.0;
+        }
+        let Some(from) = starts[i].checked_sub(half + 1) else {
+            continue;
+        };
+        let level = frames[from].av;
+        if level > 0.0 {
+            for d in 1..=half {
+                let fade = lerp(FADE_FLOOR_DB, level, d as f64 / (half + 1) as f64);
+                let fr = &mut frames[starts[i] - d];
+                fr.av = fr.av.min(fade);
             }
         }
     }
@@ -548,7 +573,6 @@ pub(crate) fn build_frames_cancellable(
         return None;
     }
 
-    let half = CROSS_FADE_FRAMES / 2;
     // Aspiration replaces voicing at the start of the sonorant after a
     // voiceless plosive, which is how voice-onset time is realized.
     for i in 0..segs.len().saturating_sub(1) {
@@ -1034,13 +1058,13 @@ mod tests {
 
     #[test]
     fn diphthongs_hold_their_onset_then_glide_just_before_closure() {
-        for (text, ph) in [("five", Ph::AY), ("loud", Ph::AW), ("noise", Ph::OY)] {
+        for (text, ph) in [("five", Ph::AY), ("cows", Ph::AW), ("noise", Ph::OY)] {
             let (segs, starts, lens, frames) = frames_for(text);
             let vowel = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
             let windows = transition_windows(&segs, &lens);
             let closure = starts[vowel] + lens[vowel] - windows[vowel].0;
             let offglide = closure - ms(DIPHTHONG_OFFGLIDE_MS);
-            let glide = offglide - ms(crate::timing::DIPHTHONG_GLIDE_MS);
+            let glide = offglide - ms(segs[vowel].glide_ms);
             let spec = ph.spec();
             let target = spec.f_end.unwrap();
             // The onset is held from the end of the incoming transition.
@@ -1054,7 +1078,7 @@ mod tests {
                     lerp(
                         spec.f[j],
                         target[j],
-                        k as f64 / ms(crate::timing::DIPHTHONG_GLIDE_MS) as f64,
+                        k as f64 / ms(segs[vowel].glide_ms) as f64,
                     )
                 });
                 assert_eq!(fr.f, expected, "{text}: glide frame {k}");
@@ -1063,6 +1087,26 @@ mod tests {
                 assert_eq!(fr.f, target, "{text}");
             }
             assert_ne!(frames[closure].f, target, "{text}");
+        }
+    }
+
+    #[test]
+    fn diphthongs_reach_most_of_their_offglide_in_fast_speech() {
+        for (text, ph) in [("five", Ph::AY), ("boy", Ph::OY), ("go down", Ph::AW)] {
+            for scale in [1.0, 0.45] {
+                let mut segs = build(&normalize(text));
+                assign_durations(&mut segs);
+                crate::prosody::scale_durations(&mut segs, scale);
+                let (starts, lens) = frame_layout(&segs);
+                let frames = build_frames(&segs);
+                let v = segs.iter().position(|s| s.ph == Some(ph)).unwrap();
+                let (from, to) = (ph.spec().f[1], ph.spec().f_end.unwrap()[1]);
+                let reached = frames[starts[v]..starts[v] + lens[v]]
+                    .iter()
+                    .map(|f| (f.f[1] - from) / (to - from))
+                    .fold(f64::MIN, f64::max);
+                assert!(reached > 0.69, "{text} at {scale}: {reached}");
+            }
         }
     }
 

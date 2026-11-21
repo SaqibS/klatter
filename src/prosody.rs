@@ -544,7 +544,10 @@ fn smooth(f0: &mut [f64], width: usize) {
 /// mechanical. Klatt & Klatt (1990) found FL = 25% sounds realistic.
 fn add_flutter(f0: &mut [f64], frame_ms: f64) {
     use std::f64::consts::TAU;
-    const FL: f64 = 25.0;
+    // Flutter disabled (Diego, Nov 16, 2026): the KLSYN88 F0 wobble was audible
+    // as flutter. Upstream value was FL = 25.0 (Klatt & Klatt 1990: 25% sounds
+    // realistic). Setting FL = 0.0 leaves the F0 contour untouched.
+    const FL: f64 = 0.0;
     for (i, v) in f0.iter_mut().enumerate() {
         let t = i as f64 * frame_ms / 1000.0;
         let wobble = (TAU * 12.7 * t).sin() + (TAU * 7.1 * t).sin() + (TAU * 4.7 * t).sin();

@@ -1,9 +1,19 @@
 //! Klatter for Android: a static library the JNI bridge (../jni) links into
-//! libklatter.so. It holds the engine's C interface, the functions of
-//! ffi/klatter.h, and a memory allocator that older Android has the functions for.
+//! libklatter.so, and Android 2.2 to 3.2's engine plugin into libttsklatter.so.
+//! It holds the engine's C interface, the functions of ffi/klatter.h; the
+//! plugin's settings and speaking (legacy.rs); and a memory allocator that older
+//! Android has the functions for.
 
-// The C interface's functions, kept in the library for the bridge to call.
-pub use klatter::*;
+// The C interface's functions (ffi/klatter.h), compiled from its own source into
+// this library, as the bridge and the plugin call them. Compiled here rather than
+// taken from the klatter-ffi crate, which also builds a shared library: NDK r10e,
+// for Android 2.2, can't link that one.
+#[path = "../../../../ffi/src/lib.rs"]
+mod ffi;
+pub use ffi::*;
+
+/// Android 2.2 to 3.2's engine plugin: its settings and speaking (jni/legacy_plugin.c).
+pub mod legacy;
 
 /// Rust's own allocator asks for posix_memalign, which Android only has from
 /// 4.2 (API 17): a library that needs it will not load on Android 4.0 and 4.1.

@@ -47,13 +47,26 @@ final class Dictionaries {
         return f;
     }
 
-    /** Where a dictionary is kept. */
-    static File file(Context context, String name) {
-        return new File(folder(context), name);
+    private static final String OLD_ANDROID_PREFIX = "dictionary-";
+
+    private static boolean oldAndroid() {
+        return android.os.Build.VERSION.SDK_INT < 14;
     }
 
+    /**
+     * Where a dictionary is kept. On Android 2.2 to 3.2 that is the files folder
+     * itself, written readable by Android's speech service (which runs the plugin),
+     * since a folder of its own would not be readable to it.
+     */
+    static File file(Context context, String name) {
+        return oldAndroid() ? new File(context.getFilesDir(), OLD_ANDROID_PREFIX + name) : new File(folder(context), name);
+    }
+
+    @SuppressWarnings("deprecation")
     private static void write(Context context, String name, byte[] text) throws IOException {
-        FileOutputStream out = new FileOutputStream(file(context, name));
+        FileOutputStream out = oldAndroid()
+                ? context.openFileOutput(OLD_ANDROID_PREFIX + name, Context.MODE_WORLD_READABLE)
+                : new FileOutputStream(file(context, name));
         try {
             out.write(text);
         } finally {

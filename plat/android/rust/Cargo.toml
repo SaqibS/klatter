@@ -3,12 +3,12 @@ name = "klatter-android"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "Klatter for Android: the C interface (klatter.h) and an allocator older Android has the functions for, as a static library for the JNI bridge"
+description = "Klatter for Android: the C interface (klatter.h), Android 2.2 to 3.2's engine plugin settings, and an allocator older Android has the functions for, as a static library"
 publish = false
 
 [lib]
 name = "klatter_engine"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-klatter-ffi = { path = "../../../ffi" }
+engine = { package = "klatter", path = "../../.." }

@@ -46,6 +46,8 @@ final class SelfTest {
         boolean ok = counts[0] == 1 && counts[1] == 1 && counts[2] == 3;
         Log.i(TAG, (ok ? "OK" : "FAIL") + " dictionary: " + counts[0] + " taken, " + counts[1] + " left out at line " + counts[2]);
 
+        checkEverySetting(context);
+
         final TextToSpeech[] holder = new TextToSpeech[1];
         holder[0] = new TextToSpeech(context, new TextToSpeech.OnInitListener() {
             public void onInit(int status) {
@@ -56,6 +58,70 @@ final class SelfTest {
                 new Run(context, holder[0]).next();
             }
         }, context.getPackageName());
+    }
+
+    /**
+     * Every voice-quality setting, at the lowest and the highest it goes, must change
+     * the sound, and every sampling rate must give audio at that rate. Spoken
+     * directly through the Synthesizer, as the speech service speaks; the user's
+     * settings are put back afterwards.
+     */
+    private static void checkEverySetting(Context context) {
+        Synthesizer synthesizer = new Synthesizer(context);
+        Settings settings = synthesizer.settings();
+        java.util.Map<String, Double> saved = settings.quality();
+        int savedRate = settings.sampleRate();
+        settings.resetQuality();
+        settings.setSampleRate(Settings.DEFAULT_SAMPLE_RATE);
+        String plain = render(synthesizer);
+        int ok = 0, bad = 0;
+        for (Parameters.Parameter p : Parameters.ALL) {
+            for (double v : new double[]{p.min, p.max}) {
+                if (v == p.defaultValue) continue;
+                settings.setQuality(p, v);
+                boolean changed = !render(synthesizer).equals(plain);
+                settings.setQuality(p, null);
+                if (changed) ok++;
+                else {
+                    bad++;
+                    Log.i(TAG, "FAIL " + p.name + " at " + Parameters.shown(v) + " changed nothing");
+                }
+            }
+        }
+        Log.i(TAG, (bad == 0 ? "OK" : "FAIL") + " voice quality: " + ok + " of " + (ok + bad)
+                + " settings at either end change the sound");
+        int rates = 0;
+        for (int rate : Settings.sampleRates()) {
+            settings.setSampleRate(rate);
+            final int[] bytes = {0};
+            synthesizer.speak("Hello.", 1, 1, 4096, new KlatterNative.AudioSink() {
+                public int onAudio(byte[] pcm, int length) { bytes[0] += length; return 0; }
+            });
+            // "Hello." is about half a second: at least a third of a second of audio.
+            if (bytes[0] > rate * 2 / 3) rates++;
+            else Log.i(TAG, "FAIL sampling rate " + rate + ": " + bytes[0] + " bytes");
+        }
+        Log.i(TAG, (rates == Settings.sampleRates().length ? "OK" : "FAIL") + " sampling rates: "
+                + rates + " of " + Settings.sampleRates().length + " give audio at their rate");
+        settings.resetQuality();
+        for (java.util.Map.Entry<String, Double> e : saved.entrySet()) {
+            settings.setQuality(Parameters.named(e.getKey()), e.getValue());
+        }
+        settings.setSampleRate(savedRate);
+        synthesizer.release();
+    }
+
+    private static String render(Synthesizer synthesizer) {
+        try {
+            final MessageDigest md = MessageDigest.getInstance("SHA-1");
+            synthesizer.speak("She sells fish, and he hopes to sing a happy tune.", 1, 1, 4096,
+                    new KlatterNative.AudioSink() {
+                        public int onAudio(byte[] pcm, int length) { md.update(pcm, 0, length); return 0; }
+                    });
+            return android.util.Base64.encodeToString(md.digest(), android.util.Base64.NO_WRAP);
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** One recording: flutter, a speed and a sampling rate. */

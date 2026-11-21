@@ -66,6 +66,8 @@ public class SettingsActivity extends Activity {
         super.onCreate(state);
         settings = new Settings(this);
         synthesizer = new Synthesizer(this);
+        // Android 2.2 to 3.2: the engine plugin's settings file, there from the start.
+        if (Build.VERSION.SDK_INT < 14) settings.exportForOldAndroid();
 
         ScrollView scroll = new ScrollView(this);
         root = new LinearLayout(this);
@@ -373,10 +375,22 @@ public class SettingsActivity extends Activity {
                     else setStatus("Android could not start Klatter's speech service.");
                 }
             };
-            systemTts = new TextToSpeech(this, ready, getPackageName());
+            if (Build.VERSION.SDK_INT >= 14) {
+                systemTts = new TextToSpeech(this, ready, getPackageName());
+            } else {
+                // Android 2.2 to 3.2: the default engine, then Klatter's plugin by name.
+                systemTts = oldTextToSpeech(ready);
+            }
         } else {
             speakSystem(text);
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    private TextToSpeech oldTextToSpeech(TextToSpeech.OnInitListener ready) {
+        TextToSpeech tts = new TextToSpeech(this, ready);
+        tts.setEngineByPackageName(getPackageName());
+        return tts;
     }
 
     @SuppressWarnings("deprecation")

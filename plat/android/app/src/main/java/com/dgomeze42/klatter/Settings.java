@@ -39,10 +39,44 @@ final class Settings {
         prefs = this.context.getSharedPreferences("klatter", Context.MODE_PRIVATE);
     }
 
+    /**
+     * Saves a change. On Android 2.2 to 3.2 Klatter is a plugin in Android's own
+     * speech service, which cannot read these settings, so they are also written to
+     * files/klatter.conf for it (rust/src/legacy.rs reads it).
+     */
     @SuppressWarnings("deprecation")
     private void save(SharedPreferences.Editor editor) {
         if (Build.VERSION.SDK_INT >= 9) editor.apply();
         else editor.commit();
+        if (Build.VERSION.SDK_INT < 14) exportForOldAndroid();
+    }
+
+    /** The settings file Android 2.2 to 3.2's engine plugin reads, readable by its process. */
+    @SuppressWarnings("deprecation")
+    void exportForOldAndroid() {
+        StringBuilder b = new StringBuilder("# Written by the Klatter app for the engine plugin; changes here are replaced.\n");
+        b.append("rate = ").append(rateWpm()).append('\n');
+        b.append("follow-rate = ").append(followSystemRate() ? "yes" : "no").append('\n');
+        b.append("pitch = ").append(exactPitch() ? String.valueOf(pitchHz()) : "natural").append('\n');
+        b.append("follow-pitch = ").append(followSystemPitch() ? "yes" : "no").append('\n');
+        b.append("inflection = ").append(inflection()).append('\n');
+        b.append("volume = ").append(volume()).append('\n');
+        b.append("sample-rate = ").append(sampleRate()).append('\n');
+        for (Map.Entry<String, Double> e : quality().entrySet()) {
+            b.append(e.getKey()).append(" = ").append(Parameters.shown(e.getValue())).append('\n');
+        }
+        for (DictionaryEntry d : dictionaries()) {
+            if (d.enabled) b.append("dictionary = ").append(Dictionaries.file(context, d.file).getPath()).append('\n');
+        }
+        try {
+            java.io.FileOutputStream out = context.openFileOutput("klatter.conf", Context.MODE_WORLD_READABLE);
+            try {
+                out.write(Parameters.utf8(b.toString()));
+            } finally {
+                out.close();
+            }
+        } catch (java.io.IOException ignored) {
+        }
     }
 
     private static int clamp(int v, int lo, int hi) {

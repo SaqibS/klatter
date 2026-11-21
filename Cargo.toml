@@ -20,4 +20,4 @@ name = "lts_accuracy"
 path = "tools/lts_accuracy.rs"
 
 [workspace]
-members = ["ffi", "plat/unix", "plat/web"]
+members = ["ffi", "plat/unix", "plat/web", "plat/android/rust"]

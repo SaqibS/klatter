@@ -379,4 +379,27 @@ mod tests {
         assert!(!q.set("xx", 1.0));
         assert!(!q.set("fl", f64::NAN));
     }
+
+    #[test]
+    fn every_setting_changes_the_voice_at_either_end() {
+        use crate::{Item, Voice, speak};
+        let text = [Item::Text("She sells fish, and he hopes to sing a happy tune.")];
+        let plain = speak(&text, 16_000, &Voice::default()).samples;
+        for p in PARAMETERS {
+            for value in [p.min, p.max] {
+                if value == p.default {
+                    continue;
+                }
+                let mut voice = Voice::default();
+                voice.quality.set(p.code, value);
+                let samples = speak(&text, 16_000, &voice).samples;
+                assert!(!samples.is_empty(), "{} {value}", p.code);
+                assert_ne!(samples, plain, "{} at {value} changed nothing", p.code);
+                let clipped = samples.iter().filter(|&&x| x == i16::MAX || x == i16::MIN).count();
+                // Loud ends may touch the rail, as the volume setting can; they
+                // must not live there.
+                assert!(clipped * 100 < samples.len(), "{} at {value}: {clipped} clipped", p.code);
+            }
+        }
+    }
 }

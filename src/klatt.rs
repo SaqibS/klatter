@@ -492,6 +492,12 @@ pub struct Synth {
     bar_rad: Radiation,
     noise_rad: Radiation,
     last_frame: Option<Frame>,
+    /// CASCADE_HIGH, ASPIRATION_HIGH and the parallel F4 to F6, after the
+    /// voice's F4 to F6 settings and head size (see `set_upper_formants`).
+    cascade_high: [(f64, f64); 4],
+    aspiration_high_poles: [(f64, f64); 2],
+    parallel_upper: [f64; 3],
+    parallel_upper_bw: [f64; 3],
 }
 
 impl Synth {
@@ -523,12 +529,32 @@ impl Synth {
             bar_rad: Radiation::default(),
             noise_rad: Radiation::default(),
             last_frame: None,
+            cascade_high: CASCADE_HIGH,
+            aspiration_high_poles: ASPIRATION_HIGH,
+            parallel_upper: [F4, F5, F6],
+            parallel_upper_bw: [PARALLEL_BW[2], PARALLEL_BW[3], PARALLEL_BW[4]],
         };
         s.tilt.bypass();
         s.rgp_bar.set(0.0, 100.0, sr);
         s.rgs.set(0.0, 200.0, sr);
         s.rnp.set(FNP, BNP, sr);
         s
+    }
+
+    /// Sets F4 to F6 and their bandwidths, and the head size's scale on every
+    /// formant above F3 (frequencies and bandwidths alike, so the spectrum keeps
+    /// its shape). The defaults, `[3250, 3700, 4990]`, `[200, 200, 500]` and 1,
+    /// leave the synthesizer as it always was. The parallel bandwidths follow
+    /// the cascade ones in proportion.
+    pub fn set_upper_formants(&mut self, freqs: [f64; 3], bandwidths: [f64; 3], scale: f64) {
+        let default_bw = [CASCADE_HIGH[0].1, CASCADE_HIGH[1].1, CASCADE_HIGH[2].1];
+        for k in 0..3 {
+            self.cascade_high[k] = (freqs[k] * scale, bandwidths[k] * scale);
+            self.parallel_upper[k] = freqs[k] * scale;
+            self.parallel_upper_bw[k] = PARALLEL_BW[k + 2] * bandwidths[k] / default_bw[k] * scale;
+        }
+        self.cascade_high[3] = (CASCADE_HIGH[3].0 * scale, CASCADE_HIGH[3].1 * scale);
+        self.aspiration_high_poles = [self.cascade_high[0], self.cascade_high[1]];
     }
 
     fn configure(&mut self, fr: &Frame) {
@@ -540,7 +566,8 @@ impl Synth {
         self.f1_open.set(fr.f[0] + fr.df1, fr.b[0] + fr.db1, sr);
         self.cascade[1].set(fr.f[1], fr.b[1], sr);
         self.cascade[2].set(fr.f[2], fr.b[2], sr);
-        for (i, &(f, b)) in CASCADE_HIGH.iter().enumerate() {
+        let cascade_high = self.cascade_high;
+        for (i, &(f, b)) in cascade_high.iter().enumerate() {
             // <= (not <), kept from Diego's Nov 16, 2026 fix: in the pre-retune
             // pole set a 3600 Hz pole sat exactly on 0.45*8000, and <= restored
             // it at 8 kHz. After the Nov 17 retune (KLSYN88 F4/F5/F6 + 6500) no
@@ -557,7 +584,7 @@ impl Synth {
                 };
             }
         }
-        for (r, &(f, b)) in self.aspiration_high.iter_mut().zip(&ASPIRATION_HIGH) {
+        for (r, &(f, b)) in self.aspiration_high.iter_mut().zip(&self.aspiration_high_poles) {
             if f <= 0.45 * sr {
                 r.set(f, b, sr);
             } else {
@@ -574,7 +601,8 @@ impl Synth {
                 self.tilt.bypass();
             }
         }
-        let par_freqs = [fr.f[1], fr.f[2], F4, F5, F6];
+        let par_freqs = [fr.f[1], fr.f[2], self.parallel_upper[0], self.parallel_upper[1], self.parallel_upper[2]];
+        let par_bw = [PARALLEL_BW[0], PARALLEL_BW[1], self.parallel_upper_bw[0], self.parallel_upper_bw[1], self.parallel_upper_bw[2]];
         for i in 0..5 {
             // Clamp the parallel formant to just below Nyquist instead of
             // letting Resonator::set bypass it. At low sample rates F6
@@ -584,7 +612,7 @@ impl Synth {
             // keeps the resonance in-band (just lower). No-op at 11 kHz and
             // above, where F6 already fits. (Diego, Nov 16, 2026.)
             let f = par_freqs[i].min(0.48 * sr);
-            self.parallel[i].set(f, PARALLEL_BW[i], sr);
+            self.parallel[i].set(f, par_bw[i], sr);
             let g = self.parallel[i].gain_at(f, sr);
             self.parallel_norm[i] = if g > 0.0 { 1.0 / g } else { 0.0 };
         }

@@ -91,7 +91,7 @@ impl Utterance {
             voice: *voice,
             pronunciations: pronunciations.clone(),
             sample_rate,
-            synth: klatt::Synth::new(sample_rate),
+            synth: crate::new_synth(sample_rate, voice),
             cancel: CancelHandle::default(),
             plan: None,
             word_events: Vec::new(),

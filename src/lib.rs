@@ -17,6 +17,7 @@ pub mod morph;
 pub mod params;
 pub mod phoneme;
 pub mod prosody;
+pub mod quality;
 pub mod stream;
 pub mod text;
 pub mod timing;
@@ -24,6 +25,7 @@ pub mod utterance;
 pub mod wav;
 
 pub use lexicon::{PronunciationError, Pronunciations};
+pub use quality::{PARAMETERS, Parameter, Quality};
 pub use stream::{CancelHandle, Rendered, Utterance, WordEvent};
 
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
@@ -78,6 +80,9 @@ pub struct Voice {
     pub inflection: f64,
     /// Linear amplitude multiplier: 1 is full level.
     pub volume: f64,
+    /// Voice quality: flutter (off by default), head size, breathiness, F4 to
+    /// F6 and the rest of [`quality::PARAMETERS`].
+    pub quality: Quality,
 }
 
 impl Default for Voice {
@@ -87,6 +92,7 @@ impl Default for Voice {
             pitch_hz: prosody::BASE_F0,
             inflection: 1.0,
             volume: 1.0,
+            quality: Quality::default(),
         }
     }
 }
@@ -180,7 +186,7 @@ pub fn speak_stream_with_pronunciations(
     if !output(&[], &[]) {
         return false;
     }
-    let mut synth = klatt::Synth::new(sample_rate);
+    let mut synth = new_synth(sample_rate, voice);
     let mut marks = frame_marks.into_iter().peekable();
     let mut sample_start = 0;
     let gain = GAIN * voice.volume;
@@ -204,6 +210,14 @@ pub fn speak_stream_with_pronunciations(
     }
     let remaining: Vec<_> = marks.map(|(id, _)| (id, 0)).collect();
     remaining.is_empty() || output(&[], &remaining)
+}
+
+/// A synthesizer at this rate with the voice's F4 to F6 and head size.
+pub(crate) fn new_synth(sample_rate: u32, voice: &Voice) -> klatt::Synth {
+    let mut synth = klatt::Synth::new(sample_rate);
+    let (freqs, bandwidths) = voice.quality.upper_formants();
+    synth.set_upper_formants(freqs, bandwidths, voice.quality.formant_scale());
+    synth
 }
 
 fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(u32, usize)>) {
@@ -276,7 +290,12 @@ fn plan_tokens_cancellable(
         return None;
     }
     let (starts, lens) = params::frame_layout(&segs);
-    let mut frames = params::build_frames_cancellable(&segs, &starts, &lens, scale, cancelled)?;
+    let melody = prosody::Melody {
+        accent_scale: voice.quality.accent_scale(),
+        declination: voice.quality.declination(),
+    };
+    let mut frames = params::build_frames_cancellable(&segs, &starts, &lens, scale, &melody, cancelled)?;
+    quality::apply(&mut frames, &voice.quality, klatt::FRAME_MS);
     let pitch_scale = voice.pitch_hz / prosody::BASE_F0;
     for f in &mut frames {
         if cancelled() {

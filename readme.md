@@ -32,10 +32,18 @@ target\release\klatter -r 300 in.txt out.wav
 
 `nvda/addon` contains a synthesizer driver for the NVDA screen reader. It supports rate, pitch, inflection and volume, index marks for cursor tracking, and mid-utterance pitch changes (NVDA uses these for capital letters). NVDA's 0-100 settings map onto Klatter's voice settings: 50 is Klatter's natural voice, and each 50 steps doubles or halves the rate or pitch.
 
+Beyond those, the add-on has:
+
+- **Rate in words per minute and pitch in hertz.** In NVDA's settings, the Klatter category has exact inputs: a rate from 30 to 1920 words per minute (219 is natural) and a base pitch from 40 to 400 Hz (100 is natural), each with a check box to use it instead of the slider. Moving NVDA's own rate or pitch slider goes back to the slider's scale.
+- **Sample rate**, a choice of the 20 rates from 8000 to 96000 Hz, 16000 by default.
+- **Voice quality**, sliders for every setting in `src/quality.rs`: flutter (off by default), head size, roughness, breathiness, open quotient, spectral tilt, voicing, frication and aspiration levels, accent size, baseline fall, and F4 to F6 with their bandwidths. Each starts at what Klatter always did, so the voice is unchanged until one is moved.
+
 ```
 rustup target add x86_64-pc-windows-msvc
 python nvda\build.py
 ```
+
+From macOS or Linux, `KLATTER_TARGET=x86_64-pc-windows-gnu python3 nvda/build.py` builds the same add-on with MinGW (Python 3.12 or newer).
 
 This writes `target\klatter-<version>.nvda-addon`. Open it to install, restart NVDA, and choose Klatter in the Speech settings. NVDA is a 64-bit x86 program, so the add-on carries an x64 DLL; it also runs under emulation on ARM64 Windows.
 
@@ -54,12 +62,13 @@ let speech = speak(&[Item::Text("Link, visited."), Item::Mark(7)], 22050, &voice
 - `Voice` uses physical units: words per minute, a pitch baseline in Hz (100 by default; the whole contour moves with it), an inflection multiplier (0 is monotone, 1 natural) and a linear volume. Hosts map their own scales onto these.
 - `Item`s interleave text with numbered marks. All items are spoken as one utterance, so a mark never breaks the phrasing.
 - Any sample rate is supported.
+- `Voice::quality` holds the voice-quality settings (`klatter::PARAMETERS` lists them, with their ranges and defaults); `quality.set("fl", 25.0)` turns flutter up.
 - For screen readers, `Utterance` pulls audio into host-owned buffers of any size and reports word events with the original text position (including for expanded numbers and abbreviations). Each utterance has a cancel handle that can be used from another thread. The audio is identical regardless of buffer size.
 - `Pronunciations` holds caller-owned overrides, such as `insert("read", "R EH1 D")`, which take precedence over the built-in dictionary.
 
 ### C interface
 
-The `ffi` crate builds `klatter.dll`, declared in `ffi/klatter.h`.
+The `ffi` crate builds `klatter.dll`, declared in `ffi/klatter.h`. `klatter_parameter_info` describes the voice-quality settings, and the `_quality` variants of the speaking functions take them as an array of doubles.
 
 - `klatter_speak` returns a whole utterance's samples and mark positions.
 - `klatter_utterance_create` / `klatter_utterance_read` provide pull rendering with word events and a thread-safe cancel handle (`klatter_utterance_cancel_handle`, `klatter_cancel`).

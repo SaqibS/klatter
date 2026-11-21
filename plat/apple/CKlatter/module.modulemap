@@ -1,0 +1,5 @@
+module CKlatter {
+    header "../../../ffi/klatter.h"
+    link "klatter"
+    export *
+}

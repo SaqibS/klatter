@@ -1,0 +1,97 @@
+name: Klatter
+options:
+  bundleIdPrefix: com.dgomeze42
+  deploymentTarget:
+    macOS: "13.0"
+    iOS: "16.0"
+  minimumXcodeGenVersion: "2.35"
+
+# Klatter's voice for VoiceOver on the Mac, iPhone and iPad: one app and one
+# speech synthesis extension, from the same sources for both.
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "1"
+    KLATTER_BUNDLE_ID: com.dgomeze42.klatter
+    DEVELOPMENT_TEAM: J4PD64C33Q
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/CKlatter
+    "LIBRARY_SEARCH_PATHS[sdk=macosx*]": $(SRCROOT)/lib/macosx
+    "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": $(SRCROOT)/lib/iphoneos
+    "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": $(SRCROOT)/lib/iphonesimulator
+    OTHER_LDFLAGS: -lklatter
+    DEAD_CODE_STRIPPING: "YES"
+  configs:
+    Release:
+      ONLY_ACTIVE_ARCH: "NO"
+
+targetTemplates:
+  Mac:
+    platform: macOS
+    settings:
+      base:
+        # On the Mac the App Group starts with the team identifier.
+        KLATTER_APP_GROUP: J4PD64C33Q.com.dgomeze42.klatter
+        CODE_SIGN_IDENTITY: Apple Development
+        ENABLE_HARDENED_RUNTIME: "NO"
+        ARCHS: arm64 x86_64
+  iOS:
+    platform: iOS
+    settings:
+      base:
+        KLATTER_APP_GROUP: group.com.dgomeze42.klatter
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  Klatter:
+    type: application
+    templates: [Mac]
+    sources: [Sources/App, Sources/Shared]
+    dependencies:
+      - target: KlatterVoice
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(KLATTER_BUNDLE_ID)
+        PRODUCT_NAME: Klatter
+        INFOPLIST_FILE: Support/Mac-App-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/Mac-App.entitlements
+        COMBINE_HIDPI_IMAGES: "YES"
+  KlatterVoice:
+    type: app-extension
+    templates: [Mac]
+    sources: [Sources/Extension, Sources/Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(KLATTER_BUNDLE_ID).voice
+        PRODUCT_NAME: KlatterVoice
+        INFOPLIST_FILE: Support/Mac-Voice-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/Mac-Voice.entitlements
+        SKIP_INSTALL: "YES"
+  KlatteriOS:
+    type: application
+    templates: [iOS]
+    sources: [Sources/App, Sources/Shared]
+    dependencies:
+      - target: KlatteriOSVoice
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(KLATTER_BUNDLE_ID)
+        PRODUCT_NAME: Klatter
+        INFOPLIST_FILE: Support/iOS-App-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/iOS.entitlements
+  KlatteriOSVoice:
+    type: app-extension
+    templates: [iOS]
+    sources: [Sources/Extension, Sources/Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(KLATTER_BUNDLE_ID).voice
+        PRODUCT_NAME: KlatterVoice
+        INFOPLIST_FILE: Support/iOS-Voice-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/iOS.entitlements
+        SKIP_INSTALL: "YES"

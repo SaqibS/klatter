@@ -57,6 +57,10 @@ Stopping speech (for example, pressing Control) cancels the native utterance as 
 
 `plat/web` is Klatter in a web browser, with every setting: the engine compiled to WebAssembly, speaking in a Web Worker. See `plat/web/README.md`.
 
+### Mac, iPhone and iPad
+
+`plat/apple` makes Klatter a VoiceOver voice on macOS 13+ (Apple silicon and Intel) and iOS/iPadOS 16+, with an app for every setting. See `plat/apple/README.md`.
+
 ### Rust library
 
 ```rust

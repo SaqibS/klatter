@@ -381,6 +381,23 @@ class SynthDriver(BaseSynthDriver):
     def _set_volume(self, value):
         self._volume = value
 
+    # A getter and setter for each voice-quality setting (_get_flutter,
+    # _set_flutter, ...), made here in the class body: NVDA turns _get_ and
+    # _set_ methods into properties as the class is created, so ones added
+    # afterwards would not exist for its settings dialog, and saving would fail.
+    def _quality_getter(setting_id, low, high):
+        return lambda self: whole(self._quality[setting_id], low, high)
+
+    def _quality_setter(setting_id, low, high):
+        def setter(self, value):
+            self._quality[setting_id] = whole(value, low, high)
+        return setter
+
+    for _code, _id, _label, _default, _low, _high, _step in QUALITY:
+        vars()[f"_get_{_id}"] = _quality_getter(_id, _low, _high)
+        vars()[f"_set_{_id}"] = _quality_setter(_id, _low, _high)
+    del _code, _id, _label, _default, _low, _high, _step, _quality_getter, _quality_setter
+
     def _quality_array(self):
         values = [float(self._quality[q[1]]) for q in QUALITY]
         return (ctypes.c_double * len(values))(*values)
@@ -529,20 +546,3 @@ class SynthDriver(BaseSynthDriver):
                     return False
             start = end
         return True
-
-
-def _add_quality_properties():
-    """A getter and setter for each voice-quality setting, as NVDA's
-    AutoPropertyObject looks for (_get_flutter, _set_flutter, ...)."""
-    for code, setting_id, label, default, low, high, step in QUALITY:
-        def getter(self, setting_id=setting_id, low=low, high=high):
-            return whole(self._quality[setting_id], low, high)
-
-        def setter(self, value, setting_id=setting_id, low=low, high=high):
-            self._quality[setting_id] = whole(value, low, high)
-
-        setattr(SynthDriver, f"_get_{setting_id}", getter)
-        setattr(SynthDriver, f"_set_{setting_id}", setter)
-
-
-_add_quality_properties()

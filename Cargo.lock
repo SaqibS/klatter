@@ -19,3 +19,10 @@ version = "0.1.0"
 dependencies = [
  "klatter",
 ]
+
+[[package]]
+name = "klatter-web"
+version = "0.2.0"
+dependencies = [
+ "klatter",
+]

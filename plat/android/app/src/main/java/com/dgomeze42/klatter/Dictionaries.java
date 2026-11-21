@@ -47,28 +47,13 @@ final class Dictionaries {
         return f;
     }
 
-    /** Where Android 2.2 to 3.2's engine plugin, in another process, can read them. */
-    private static final String OLD_ANDROID_PREFIX = "dictionary-";
-
-    private static boolean oldAndroid() {
-        return android.os.Build.VERSION.SDK_INT < 14;
-    }
-
-    /**
-     * Where a dictionary is kept. On Android 2.2 to 3.2 that is the files folder
-     * itself, written readable by Android's speech service (which runs the plugin
-     * and cannot change a file's permissions after), since a folder of its own
-     * would not be readable to it.
-     */
+    /** Where a dictionary is kept. */
     static File file(Context context, String name) {
-        return oldAndroid() ? new File(context.getFilesDir(), OLD_ANDROID_PREFIX + name) : new File(folder(context), name);
+        return new File(folder(context), name);
     }
 
-    @SuppressWarnings("deprecation")
     private static void write(Context context, String name, byte[] text) throws IOException {
-        FileOutputStream out = oldAndroid()
-                ? context.openFileOutput(OLD_ANDROID_PREFIX + name, Context.MODE_WORLD_READABLE)
-                : new FileOutputStream(file(context, name));
+        FileOutputStream out = new FileOutputStream(file(context, name));
         try {
             out.write(text);
         } finally {
@@ -160,16 +145,17 @@ final class Dictionaries {
     /** A native dictionary holding every enabled file, in order; 0 if there are none. */
     static long build(Context context, Settings settings) {
         long d = 0;
+        int taken = 0;
         for (Settings.DictionaryEntry e : settings.dictionaries()) {
             if (!e.enabled) continue;
             try {
                 byte[] text = read(file(context, e.file));
                 if (d == 0) d = KlatterNative.dictionaryNew();
-                KlatterNative.dictionaryLoad(d, text);
+                taken += KlatterNative.dictionaryLoad(d, text)[0];
             } catch (IOException ignored) {
             }
         }
-        if (d != 0 && KlatterNative.dictionarySize(d) == 0) {
+        if (d != 0 && taken == 0) {
             KlatterNative.dictionaryFree(d);
             d = 0;
         }

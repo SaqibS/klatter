@@ -61,6 +61,10 @@ Stopping speech (for example, pressing Control) cancels the native utterance as 
 
 `plat/apple` makes Klatter a VoiceOver voice on macOS 13+ (Apple silicon and Intel) and iOS/iPadOS 16+, with an app for every setting. See `plat/apple/README.md`.
 
+### Android
+
+`plat/android` makes Klatter an Android text-to-speech engine for TalkBack and every app, from Android 4.0 on phones, tablets, notetakers and Wear OS, with an app for every setting. See `plat/android/README.md`.
+
 ### Rust library
 
 ```rust

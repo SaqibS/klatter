@@ -202,7 +202,10 @@ class SynthDriver(BaseSynthDriver):
     description = "Klatter"
     # The exact rate and pitch are hidden from NVDA's automatic Speech panel
     # (ids starting with an underscore are skipped) and set in the Klatter
-    # panel instead, with exact numeric inputs; they are still saved.
+    # panel instead, with exact numeric inputs; they are still saved. They are
+    # plain attributes of the same names, with no _get_/_set_ methods: NVDA
+    # would make such methods into properties named _rateWpm and so on, and
+    # storing the value would then call the setter forever.
     _rateWpmSetting = NumericDriverSetting(
         "_rateWpm", "Rate in &words per minute", defaultVal=219, minVal=MIN_WPM, maxVal=MAX_WPM,
     )
@@ -327,18 +330,6 @@ class SynthDriver(BaseSynthDriver):
         if not self._loadingSettings:
             self._rateInWpm = False
 
-    def _get__rateWpm(self):
-        return whole(self._rateWpm, MIN_WPM, MAX_WPM)
-
-    def _set__rateWpm(self, value):
-        self._rateWpm = whole(value, MIN_WPM, MAX_WPM)
-
-    def _get__rateInWpm(self):
-        return self._rateInWpm
-
-    def _set__rateInWpm(self, value):
-        self._rateInWpm = bool(value)
-
     def configure_rate_wpm(self, enabled, wpm):
         """Called by the Klatter settings panel."""
         self._rateWpm = whole(wpm, MIN_WPM, MAX_WPM)
@@ -351,18 +342,6 @@ class SynthDriver(BaseSynthDriver):
         self._pitch = value
         if not self._loadingSettings:
             self._pitchInHertz = False
-
-    def _get__pitchHertz(self):
-        return whole(self._pitchHertz, MIN_PITCH_HZ, MAX_PITCH_HZ)
-
-    def _set__pitchHertz(self, value):
-        self._pitchHertz = whole(value, MIN_PITCH_HZ, MAX_PITCH_HZ)
-
-    def _get__pitchInHertz(self):
-        return self._pitchInHertz
-
-    def _set__pitchInHertz(self, value):
-        self._pitchInHertz = bool(value)
 
     def configure_pitch_hertz(self, enabled, hertz):
         """Called by the Klatter settings panel."""

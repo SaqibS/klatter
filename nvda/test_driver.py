@@ -84,7 +84,8 @@ class BaseSynthDriver:
         # NVDA's config refuses a non-integer for an integer setting.
         for setting in self.supportedSettings:
             if isinstance(setting, NumericDriverSetting):
-                value = getattr(self, "_get_" + setting.id)()
+                getter = getattr(self, "_get_" + setting.id, None)
+                value = getter() if getter else getattr(self, setting.id)
                 assert isinstance(value, int), (setting.id, value)
                 assert setting.minVal <= value <= setting.maxVal, (setting.id, value)
         events.append(("saved", None))
@@ -329,7 +330,7 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(self.synth._get_headSize(), 135)
         self.synth.configure_rate_wpm(True, 5000.4)
         self.synth.configure_pitch_hertz(True, 123.6)
-        self.assertEqual((self.synth._get__rateWpm(), self.synth._get__pitchHertz()), (1920, 124))
+        self.assertEqual((self.synth._rateWpm, self.synth._pitchHertz), (1920, 124))
         self.synth.saveSettings()
         self.assertIn(("saved", None), events)
 

@@ -541,7 +541,12 @@ impl Synth {
         self.cascade[1].set(fr.f[1], fr.b[1], sr);
         self.cascade[2].set(fr.f[2], fr.b[2], sr);
         for (i, &(f, b)) in CASCADE_HIGH.iter().enumerate() {
-            if f < 0.45 * sr {
+            // <= (not <), kept from Diego's Nov 16, 2026 fix: in the pre-retune
+            // pole set a 3600 Hz pole sat exactly on 0.45*8000, and <= restored
+            // it at 8 kHz. After the Nov 17 retune (KLSYN88 F4/F5/F6 + 6500) no
+            // pole sits exactly on the guard at any rate, so this is currently
+            // inert — kept so a future pole landing on the boundary is included.
+            if f <= 0.45 * sr {
                 self.cascade[i + 3].set(f, b, sr);
                 self.aspiration_cancel[i].set(f, b, sr);
             } else {
@@ -553,7 +558,7 @@ impl Synth {
             }
         }
         for (r, &(f, b)) in self.aspiration_high.iter_mut().zip(&ASPIRATION_HIGH) {
-            if f < 0.45 * sr {
+            if f <= 0.45 * sr {
                 r.set(f, b, sr);
             } else {
                 r.bypass();

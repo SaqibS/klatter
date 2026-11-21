@@ -84,6 +84,14 @@ class Section(dict):
     def isSet(self, key):
         return key in self
 
+    def __missing__(self, key):
+        # As NVDA's configuration does: a setting never saved reads as its spec's default.
+        spec = self.spec.get(key)
+        if isinstance(spec, str) and "default=" in spec:
+            default = spec.split("default=", 1)[1].split(",")[0].rstrip(")").strip().strip('"')
+            return validate(spec, default) if not spec.startswith("string") else default
+        raise KeyError(key)
+
     def __setitem__(self, key, value):
         if isinstance(value, dict) and not isinstance(value, Section):
             section = Section()

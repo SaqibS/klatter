@@ -7,6 +7,13 @@ name = "klatter"
 version = "0.1.0"
 
 [[package]]
+name = "klatter-cli"
+version = "0.2.0"
+dependencies = [
+ "klatter",
+]
+
+[[package]]
 name = "klatter-ffi"
 version = "0.1.0"
 dependencies = [

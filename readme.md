@@ -49,6 +49,10 @@ This writes `target\klatter-<version>.nvda-addon`. Open it to install, restart N
 
 Stopping speech (for example, pressing Control) cancels the native utterance as well as stopping playback, so a long paragraph that is still being planned does not delay the next utterance.
 
+### Linux and FreeBSD
+
+`plat/unix` builds the `klatter` command for Linux (x86_64, i686, aarch64, armv7, riscv64, ppc64le, s390x, loongarch64) and FreeBSD 14 (x86_64, aarch64, i686), with a Speech Dispatcher module so Orca can use Klatter. It speaks text or standard input, saves WAV files at any of the 20 sample rates, and takes every setting: `klatter -r 400 --flutter 25 --set hs=110 "Hello"`. Settings live in `~/.config/klatter/klatter.conf`. `plat/unix/build-unix.sh` cross-builds every package with cargo-zigbuild; see `plat/unix/README.txt`.
+
 ### Rust library
 
 ```rust

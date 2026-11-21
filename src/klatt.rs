@@ -571,8 +571,16 @@ impl Synth {
         }
         let par_freqs = [fr.f[1], fr.f[2], F4, F5, F6];
         for i in 0..5 {
-            self.parallel[i].set(par_freqs[i], PARALLEL_BW[i], sr);
-            let g = self.parallel[i].gain_at(par_freqs[i], sr);
+            // Clamp the parallel formant to just below Nyquist instead of
+            // letting Resonator::set bypass it. At low sample rates F6
+            // (4990 Hz) is above Nyquist (8/10 kHz), and bypassing it leaves
+            // the A6 amplitude driving flat noise instead of a resonance, so
+            // fricatives (/s/, /th/) turn harsh and unfocused. Clamping
+            // keeps the resonance in-band (just lower). No-op at 11 kHz and
+            // above, where F6 already fits. (Diego, Nov 16, 2026.)
+            let f = par_freqs[i].min(0.48 * sr);
+            self.parallel[i].set(f, PARALLEL_BW[i], sr);
+            let g = self.parallel[i].gain_at(f, sr);
             self.parallel_norm[i] = if g > 0.0 { 1.0 / g } else { 0.0 };
         }
     }

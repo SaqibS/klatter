@@ -57,15 +57,17 @@ pub unsafe extern "C" fn klatter_default_voice(out: *mut KlatterVoice) {
 /// null if no item is a mark), every non-null text must be NUL-terminated, and
 /// `voice` must point to a `KlatterVoice`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn klatter_speak(
+pub unsafe extern "C" fn klatter_speak_quality(
     texts: *const *const c_char,
     marks: *const u32,
     count: usize,
     sample_rate: u32,
     voice: *const KlatterVoice,
+    quality: *const f64,
+    quality_count: usize,
 ) -> *mut KlatterSpeech {
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        with_input(texts, marks, count, sample_rate, voice, |items, voice| {
+        with_input(texts, marks, count, sample_rate, voice, quality, quality_count, |items, voice| {
             own_speech(engine::speak(items, sample_rate, voice))
         })
     }));
@@ -78,6 +80,8 @@ unsafe fn with_input<R>(
     count: usize,
     sample_rate: u32,
     voice: *const KlatterVoice,
+    quality: *const f64,
+    quality_count: usize,
     speak: impl FnOnce(&[Item], &Voice) -> R,
 ) -> Option<R> {
     let v = unsafe { voice.as_ref() }?;
@@ -107,12 +111,20 @@ unsafe fn with_input<R>(
             items.push(Item::Text(text));
         }
     }
-    let voice = Voice {
+    let mut voice = Voice {
         wpm: v.wpm,
         pitch_hz: v.pitch_hz,
         inflection: v.inflection,
         volume: v.volume,
+        ..Voice::default()
     };
+    if !quality.is_null() {
+        let count = quality_count.min(engine::PARAMETERS.len());
+        for i in 0..count {
+            // NaN keeps the setting's default.
+            voice.quality.set_index(i, unsafe { *quality.add(i) });
+        }
+    }
     Some(speak(&items, &voice))
 }
 
@@ -150,18 +162,20 @@ pub type SpeechCallback = unsafe extern "C" fn(*const KlatterSpeech, *mut c_void
 /// unwind, free the block, or retain its pointers after returning. `context`
 /// must be valid for the callback. All calls are synchronous on the calling thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn klatter_speak_stream(
+pub unsafe extern "C" fn klatter_speak_stream_quality(
     texts: *const *const c_char,
     marks: *const u32,
     count: usize,
     sample_rate: u32,
     voice: *const KlatterVoice,
+    quality: *const f64,
+    quality_count: usize,
     callback: Option<SpeechCallback>,
     context: *mut c_void,
 ) -> c_int {
     let Some(callback) = callback else { return -1 };
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        with_input(texts, marks, count, sample_rate, voice, |items, voice| {
+        with_input(texts, marks, count, sample_rate, voice, quality, quality_count, |items, voice| {
             engine::speak_stream(items, sample_rate, voice, |samples, marks| {
                 let (ids, offsets): (Vec<_>, Vec<_>) = marks.iter().copied().unzip();
                 let block = KlatterSpeech {
@@ -269,16 +283,18 @@ pub struct KlatterCancel(engine::CancelHandle);
 /// Input arrays follow [`klatter_speak`]. An optional dictionary must be live and
 /// not concurrently modified. Inputs and overrides are copied before returning.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn klatter_utterance_create(
+pub unsafe extern "C" fn klatter_utterance_create_quality(
     texts: *const *const c_char,
     marks: *const u32,
     count: usize,
     sample_rate: u32,
     voice: *const KlatterVoice,
+    quality: *const f64,
+    quality_count: usize,
     dictionary: *const KlatterPronunciations,
 ) -> *mut KlatterUtterance {
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        with_input(texts, marks, count, sample_rate, voice, |items, voice| {
+        with_input(texts, marks, count, sample_rate, voice, quality, quality_count, |items, voice| {
             let empty = engine::Pronunciations::default();
             let pronunciations = dictionary.as_ref().map_or(&empty, |d| &d.0);
             engine::Utterance::new(items, sample_rate, voice, pronunciations).map(|stream| {
@@ -410,6 +426,38 @@ pub unsafe extern "C" fn klatter_utterance_free(utterance: *mut KlatterUtterance
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quality_settings_are_described_and_change_the_voice() {
+        assert_eq!(klatter_parameter_count(), engine::PARAMETERS.len());
+        let mut info = std::mem::MaybeUninit::<KlatterParameterInfo>::uninit();
+        assert_eq!(unsafe { klatter_parameter_info(0, info.as_mut_ptr()) }, 1);
+        let info = unsafe { info.assume_init() };
+        assert_eq!(unsafe { CStr::from_ptr(info.code) }.to_str().unwrap(), "fl");
+        assert_eq!(info.default_value, 0.0);
+        assert_eq!(unsafe { klatter_parameter_info(999, std::ptr::null_mut()) }, -1);
+
+        let text = std::ffi::CString::new("Hello there.").unwrap();
+        let texts = [text.as_ptr()];
+        let voice = default_voice();
+        let samples = |quality: &[f64]| unsafe {
+            let s = klatter_speak_quality(texts.as_ptr(), std::ptr::null(), 1, 16000, &voice,
+                                          quality.as_ptr(), quality.len());
+            assert!(!s.is_null());
+            let v = std::slice::from_raw_parts((*s).samples, (*s).sample_count).to_vec();
+            klatter_free(s);
+            v
+        };
+        let mut defaults = vec![0.0; klatter_parameter_count()];
+        assert_eq!(unsafe { klatter_default_quality(defaults.as_mut_ptr(), defaults.len()) }, defaults.len());
+        let plain = samples(&[]);
+        assert_eq!(samples(&defaults), plain);
+        assert_eq!(samples(&[f64::NAN; 3]), plain);
+        assert_ne!(samples(&[25.0]), plain, "flutter 25");
+        let mut big_head = defaults.clone();
+        big_head[1] = 130.0;
+        assert_ne!(samples(&big_head), plain);
+    }
+
     use super::*;
     use std::ffi::CString;
 
@@ -753,4 +801,125 @@ mod tests {
             -1
         );
     }
+}
+
+// ---- Voice quality -----------------------------------------------------------
+
+/// The original entry points speak with the default voice quality.
+///
+/// # Safety
+/// As [`klatter_speak_quality`] with no quality settings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_speak(
+    texts: *const *const c_char,
+    marks: *const u32,
+    count: usize,
+    sample_rate: u32,
+    voice: *const KlatterVoice,
+) -> *mut KlatterSpeech {
+    unsafe { klatter_speak_quality(texts, marks, count, sample_rate, voice, std::ptr::null(), 0) }
+}
+
+/// # Safety
+/// As [`klatter_speak_stream_quality`] with no quality settings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_speak_stream(
+    texts: *const *const c_char,
+    marks: *const u32,
+    count: usize,
+    sample_rate: u32,
+    voice: *const KlatterVoice,
+    callback: Option<SpeechCallback>,
+    context: *mut c_void,
+) -> c_int {
+    unsafe {
+        klatter_speak_stream_quality(texts, marks, count, sample_rate, voice, std::ptr::null(), 0, callback, context)
+    }
+}
+
+/// # Safety
+/// As [`klatter_utterance_create_quality`] with no quality settings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_utterance_create(
+    texts: *const *const c_char,
+    marks: *const u32,
+    count: usize,
+    sample_rate: u32,
+    voice: *const KlatterVoice,
+    dictionary: *const KlatterPronunciations,
+) -> *mut KlatterUtterance {
+    unsafe {
+        klatter_utterance_create_quality(texts, marks, count, sample_rate, voice, std::ptr::null(), 0, dictionary)
+    }
+}
+
+/// One voice-quality setting, as `klatter_parameter_info` describes it. The
+/// strings are static, NUL-terminated UTF-8.
+#[repr(C)]
+pub struct KlatterParameterInfo {
+    pub code: *const c_char,
+    pub name: *const c_char,
+    pub unit: *const c_char,
+    pub help: *const c_char,
+    pub min: f64,
+    pub max: f64,
+    pub default_value: f64,
+    pub step: f64,
+}
+
+/// The number of voice-quality settings, the length of a full `quality` array.
+#[unsafe(no_mangle)]
+pub extern "C" fn klatter_parameter_count() -> usize {
+    engine::PARAMETERS.len()
+}
+
+fn static_cstr(text: &'static str) -> *const c_char {
+    use std::collections::HashMap;
+    use std::ffi::CString;
+    use std::sync::{Mutex, OnceLock};
+    static STRINGS: OnceLock<Mutex<HashMap<&'static str, &'static CString>>> = OnceLock::new();
+    let mut map = STRINGS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(text)
+        .or_insert_with(|| Box::leak(Box::new(CString::new(text).unwrap_or_default())))
+        .as_ptr()
+}
+
+/// Describes setting `index`. Returns 1, or -1 for an index out of range or a
+/// null `out`.
+///
+/// # Safety
+/// `out` must be null or point to writable memory for one `KlatterParameterInfo`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_parameter_info(index: usize, out: *mut KlatterParameterInfo) -> c_int {
+    let (Some(p), Some(out)) = (engine::PARAMETERS.get(index), unsafe { out.as_mut() }) else {
+        return -1;
+    };
+    *out = KlatterParameterInfo {
+        code: static_cstr(p.code),
+        name: static_cstr(p.name),
+        unit: static_cstr(p.unit),
+        help: static_cstr(p.help),
+        min: p.min,
+        max: p.max,
+        default_value: p.default,
+        step: p.step,
+    };
+    1
+}
+
+/// Fills `out` with every setting's default, up to `count` values; returns how
+/// many it wrote.
+///
+/// # Safety
+/// `out` must point to `count` writable doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn klatter_default_quality(out: *mut f64, count: usize) -> usize {
+    if out.is_null() {
+        return 0;
+    }
+    let n = count.min(engine::PARAMETERS.len());
+    for (i, p) in engine::PARAMETERS.iter().take(n).enumerate() {
+        unsafe { *out.add(i) = p.default };
+    }
+    n
 }

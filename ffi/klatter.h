@@ -104,6 +104,43 @@ KlatterCancel *klatter_utterance_cancel_handle(const KlatterUtterance *utterance
 void klatter_cancel(const KlatterCancel *cancel);
 void klatter_cancel_free(KlatterCancel *cancel);
 
+/* ---- Voice quality ----------------------------------------------------------
+   Settings beyond KlatterVoice: flutter (off by default), head size, roughness,
+   breathiness, open quotient, spectral tilt, voicing/frication/aspiration
+   levels, accent size, baseline fall, and F4-F6 with their bandwidths. Each is
+   an index into a quality array of doubles; klatter_parameter_info describes it.
+   A shorter array, or NaN in a slot, keeps that setting's default; values are
+   kept within range. New settings are only ever added at the end. */
+
+typedef struct {
+    const char *code;   /* short code, such as "fl" or "hs" */
+    const char *name;   /* such as "Flutter" */
+    const char *unit;   /* "percent", "hertz", "decibels", "hertz per second" or "" */
+    const char *help;   /* one sentence */
+    double min, max, default_value, step;
+} KlatterParameterInfo;
+
+size_t klatter_parameter_count(void);
+/* Returns 1, or -1 for an index out of range. The strings are static. */
+int klatter_parameter_info(size_t index, KlatterParameterInfo *out);
+/* Writes up to count defaults; returns how many. */
+size_t klatter_default_quality(double *out, size_t count);
+
+/* As klatter_speak, klatter_speak_stream and klatter_utterance_create, with
+   voice-quality settings (quality may be NULL for the defaults). */
+KlatterSpeech *klatter_speak_quality(const char *const *texts, const uint32_t *marks, size_t count,
+                                     uint32_t sample_rate, const KlatterVoice *voice,
+                                     const double *quality, size_t quality_count);
+int klatter_speak_stream_quality(const char *const *texts, const uint32_t *marks, size_t count,
+                                 uint32_t sample_rate, const KlatterVoice *voice,
+                                 const double *quality, size_t quality_count,
+                                 KlatterSpeechCallback callback, void *context);
+KlatterUtterance *klatter_utterance_create_quality(
+    const char *const *texts, const uint32_t *marks, size_t count,
+    uint32_t sample_rate, const KlatterVoice *voice,
+    const double *quality, size_t quality_count,
+    const KlatterPronunciations *dictionary);
+
 #ifdef __cplusplus
 }
 #endif

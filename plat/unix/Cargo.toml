@@ -1,0 +1,16 @@
+[package]
+name = "klatter-cli"
+version = "0.2.4"
+edition = "2024"
+license = "MIT"
+description = "Klatter for Linux and FreeBSD: speaks, saves WAV files, and serves Speech Dispatcher"
+publish = false
+
+# Packaged as bin/klatter (build-unix.sh); named klatter-cli here so it does not
+# collide with the root crate's klatter program in target/.
+[[bin]]
+name = "klatter-cli"
+path = "src/main.rs"
+
+[dependencies]
+klatter = { path = "../.." }

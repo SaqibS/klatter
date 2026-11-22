@@ -78,6 +78,12 @@ const ASPIRATE_MS: f64 = 60.0;
 /// of power, picked by speech-recognition intelligibility of Harvard
 /// sentences at 450 words per minute, where fixed transitions left most
 /// vowels only a 5 ms steady state and more words were misheard.
+///
+/// Speech above the natural rate no longer uses this: it is planned at natural
+/// timing and compressed evenly (`prosody::scale_durations_evenly`), which
+/// keeps vowels' steady states at 400 words per minute and above, where this
+/// law let transitions take them over. `assign` with a scale below 1 still
+/// follows it.
 const TRANSITION_RATE_EXPONENT: f64 = 0.5;
 
 fn is_obstruent(p: Ph) -> bool {

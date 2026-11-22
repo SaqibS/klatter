@@ -32,14 +32,38 @@ target\release\klatter -r 300 in.txt out.wav
 
 `nvda/addon` contains a synthesizer driver for the NVDA screen reader. It supports rate, pitch, inflection and volume, index marks for cursor tracking, and mid-utterance pitch changes (NVDA uses these for capital letters). NVDA's 0-100 settings map onto Klatter's voice settings: 50 is Klatter's natural voice, and each 50 steps doubles or halves the rate or pitch.
 
+Beyond those, the add-on has:
+
+- **Rate in words per minute and pitch in hertz.** In NVDA's settings, the Klatter category has exact inputs: a rate from 30 to 1920 words per minute (219 is natural) and a base pitch from 40 to 400 Hz (100 is natural), each with a check box to use it instead of the slider. Moving NVDA's own rate or pitch slider goes back to the slider's scale.
+- **Sample rate**, a choice of the 20 rates from 8000 to 96000 Hz, 16000 by default.
+- **Voice quality**, sliders for every setting in `src/quality.rs`: flutter (off by default), head size, roughness, breathiness, open quotient, spectral tilt, voicing, frication and aspiration levels, accent size, baseline fall, and F4 to F6 with their bandwidths. Each starts at what Klatter always did, so the voice is unchanged until one is moved.
+
 ```
 rustup target add x86_64-pc-windows-msvc
 python nvda\build.py
 ```
 
+From macOS or Linux, `KLATTER_TARGET=x86_64-pc-windows-gnu python3 nvda/build.py` builds the same add-on with MinGW (Python 3.12 or newer).
+
 This writes `target\klatter-<version>.nvda-addon`. Open it to install, restart NVDA, and choose Klatter in the Speech settings. NVDA is a 64-bit x86 program, so the add-on carries an x64 DLL; it also runs under emulation on ARM64 Windows.
 
 Stopping speech (for example, pressing Control) cancels the native utterance as well as stopping playback, so a long paragraph that is still being planned does not delay the next utterance.
+
+### Linux and FreeBSD
+
+`plat/unix` builds the `klatter` command for Linux (x86_64, i686, aarch64, armv7, riscv64, ppc64le, s390x, loongarch64) and FreeBSD 14 (x86_64, aarch64, i686), with a Speech Dispatcher module so Orca can use Klatter. It speaks text or standard input, saves WAV files at any of the 20 sample rates, and takes every setting: `klatter -r 400 --flutter 25 --set hs=110 "Hello"`. Settings live in `~/.config/klatter/klatter.conf`. `plat/unix/build-unix.sh` cross-builds every package with cargo-zigbuild; see `plat/unix/README.txt`.
+
+### Web
+
+`plat/web` is Klatter in a web browser, with every setting: the engine compiled to WebAssembly, speaking in a Web Worker. See `plat/web/README.md`.
+
+### Mac, iPhone and iPad
+
+`plat/apple` makes Klatter a VoiceOver voice on macOS 13+ (Apple silicon and Intel) and iOS/iPadOS 16+, with an app for every setting. See `plat/apple/README.md`.
+
+### Android
+
+`plat/android` makes Klatter an Android text-to-speech engine for TalkBack and every app, from Android 4.0 on phones, tablets, notetakers and Wear OS, with an app for every setting. See `plat/android/README.md`.
 
 ### Rust library
 
@@ -54,12 +78,13 @@ let speech = speak(&[Item::Text("Link, visited."), Item::Mark(7)], 22050, &voice
 - `Voice` uses physical units: words per minute, a pitch baseline in Hz (100 by default; the whole contour moves with it), an inflection multiplier (0 is monotone, 1 natural) and a linear volume. Hosts map their own scales onto these.
 - `Item`s interleave text with numbered marks. All items are spoken as one utterance, so a mark never breaks the phrasing.
 - Any sample rate is supported.
+- `Voice::quality` holds the voice-quality settings (`klatter::PARAMETERS` lists them, with their ranges and defaults); `quality.set("fl", 25.0)` turns flutter up.
 - For screen readers, `Utterance` pulls audio into host-owned buffers of any size and reports word events with the original text position (including for expanded numbers and abbreviations). Each utterance has a cancel handle that can be used from another thread. The audio is identical regardless of buffer size.
 - `Pronunciations` holds caller-owned overrides, such as `insert("read", "R EH1 D")`, which take precedence over the built-in dictionary.
 
 ### C interface
 
-The `ffi` crate builds `klatter.dll`, declared in `ffi/klatter.h`.
+The `ffi` crate builds `klatter.dll`, declared in `ffi/klatter.h`. `klatter_parameter_info` describes the voice-quality settings, and the `_quality` variants of the speaking functions take them as an array of doubles.
 
 - `klatter_speak` returns a whole utterance's samples and mark positions.
 - `klatter_utterance_create` / `klatter_utterance_read` provide pull rendering with word events and a thread-safe cancel handle (`klatter_utterance_cancel_handle`, `klatter_cancel`).
@@ -107,7 +132,7 @@ Some values are not in the papers, or Klatter departs from them. Each is documen
 
 - **Predictable, even delivery.** Stressed vowels are shorter and unstressed vowels in content words longer than Klatt's rules give (except in phrase-final syllables, which are already lengthened), stop closures and fricatives are slightly shorter, phrase-final lengthening is trimmed, and the pitch range is narrower than in Klatt's (1987) example contour. A listener chose this evenly timed, less sing-song delivery over Klatt's rules alone in several blind comparisons.
 - **Separate pitch accents.** Each accent rises from and returns to a declining baseline, as in Pierrehumbert's (1981) synthesis of well-separated accents, rather than pitch staying raised from the first accent to the last as in Klatt's (1987) hat pattern; holding a hat between accents made speech recognition mishear more words of the Harvard sentences.
-- **Fast speech.** Hertz (1991, p. 106) expects transitions to shorten in fast speech by less than the phones, but gives no figure. Above the natural rate, Klatter shortens them by the square root of the phones' duration scale, a power it chose by speech-recognition intelligibility at 450 words per minute: with transitions fixed, most vowels kept only a 5 ms steady state and more words were misheard. Hertz gives no lower limit either, so every phone keeps at least one 5 ms frame of steady state; where the transitions would leave less, the longer of a phone's two transitions shortens first, so short stop releases keep their place cue. A diphthong's glide is cut short as in Hertz's fast [said] (Fig. 17), but always gets at least 70% of the way to its offglide, as hers does.
+- **Fast speech.** Above the natural rate, Klatter plans speech at natural timing and plays it faster, compressing every phone, transition and pitch movement by the same factor (`prosody::scale_durations_evenly`, `klatt::Synth::set_compression`), as Klattara does; only pauses shrink faster, as below. Hertz (1991, p. 106) expects transitions to shorten in fast speech by less than the phones, and Klatter once did that, shortening them by the square root of the phones' duration scale; but at 400 words per minute and above, the transitions then took over short vowels, whose formants never settled, and words ran together. Even compression keeps each vowel's steady state and each consonant's place cue in proportion at any rate, and it is what the user preferred by ear at 400, 600 and 900 words per minute; Klattara's speech-recognition tests also found it clearer than Klatt's rate rules (68% of words against 59% at about 350 words per minute). Slower than the natural rate, phones lengthen by the rules, and every phone keeps at least one 5 ms frame of steady state.
 - **One transition for all formants.** Klatter moves every formant over one transition, so a stop's transitions take Kewley-Port's (1982) F1 durations for its place; her F2 and F3 durations were not used. She measured releases into vowels only, and Klatter uses the same durations for a vowel into a stop closure. Hertz's (1991) [dad] transitions (65 and 70 ms) made speech recognition mishear more stops in the Harvard sentences.
 - **Onset sonorants.** Hertz's vowel-to-liquid and vowel-to-nasal transitions join a vowel to a consonant of its own syllable's coda, so Klatter uses them only there. The papers give no duration for an onset nasal, liquid or glide moving into its vowel, for a vowel into a coda glide, or for the joins around /h/; Klatter uses 40 ms (60 ms around /h/).
 - **Pauses between sentences.** Klatt's (1979) rules time one sentence at a time, so Klatter pauses twice his 200 ms clause pause between sentences. Slower than the natural rate, pauses lengthen with the speech. Faster, they shrink faster than the speech, as readers speed up mostly by pausing less (Grosjean & Lane 1974): over the readers' 2.7-fold range of reading rates, total pause time fell 16.5-fold (fewer and shorter pauses) while articulation rate rose 2.1-fold. Klatter drops no pauses, so its pauses shorten by the power of the phones' duration scale that matches those totals (3.8), and the rate setting accounts for the shrinking pauses so that it still gives that many words per minute.

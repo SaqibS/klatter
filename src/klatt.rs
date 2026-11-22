@@ -492,6 +492,18 @@ pub struct Synth {
     bar_rad: Radiation,
     noise_rad: Radiation,
     last_frame: Option<Frame>,
+    /// CASCADE_HIGH, ASPIRATION_HIGH and the parallel F4 to F6, after the
+    /// voice's F4 to F6 settings and head size (see `set_upper_formants`).
+    cascade_high: [(f64, f64); 4],
+    aspiration_high_poles: [(f64, f64); 2],
+    parallel_upper: [f64; 3],
+    parallel_upper_bw: [f64; 3],
+    /// How much faster than planned the frames play: 1 plays each frame for
+    /// FRAME_MS; above it, each is that much shorter (see `set_compression`).
+    compression: f64,
+    /// Frames rendered since the compression was set, to place each frame's
+    /// samples exactly where `frame_start_at` says they start.
+    frames_rendered: u64,
 }
 
 impl Synth {
@@ -523,12 +535,34 @@ impl Synth {
             bar_rad: Radiation::default(),
             noise_rad: Radiation::default(),
             last_frame: None,
+            cascade_high: CASCADE_HIGH,
+            aspiration_high_poles: ASPIRATION_HIGH,
+            parallel_upper: [F4, F5, F6],
+            parallel_upper_bw: [PARALLEL_BW[2], PARALLEL_BW[3], PARALLEL_BW[4]],
+            compression: 1.0,
+            frames_rendered: 0,
         };
         s.tilt.bypass();
         s.rgp_bar.set(0.0, 100.0, sr);
         s.rgs.set(0.0, 200.0, sr);
         s.rnp.set(FNP, BNP, sr);
         s
+    }
+
+    /// Sets F4 to F6 and their bandwidths, and the head size's scale on every
+    /// formant above F3 (frequencies and bandwidths alike, so the spectrum keeps
+    /// its shape). The defaults, `[3250, 3700, 4990]`, `[200, 200, 500]` and 1,
+    /// leave the synthesizer as it always was. The parallel bandwidths follow
+    /// the cascade ones in proportion.
+    pub fn set_upper_formants(&mut self, freqs: [f64; 3], bandwidths: [f64; 3], scale: f64) {
+        let default_bw = [CASCADE_HIGH[0].1, CASCADE_HIGH[1].1, CASCADE_HIGH[2].1];
+        for k in 0..3 {
+            self.cascade_high[k] = (freqs[k] * scale, bandwidths[k] * scale);
+            self.parallel_upper[k] = freqs[k] * scale;
+            self.parallel_upper_bw[k] = PARALLEL_BW[k + 2] * bandwidths[k] / default_bw[k] * scale;
+        }
+        self.cascade_high[3] = (CASCADE_HIGH[3].0 * scale, CASCADE_HIGH[3].1 * scale);
+        self.aspiration_high_poles = [self.cascade_high[0], self.cascade_high[1]];
     }
 
     fn configure(&mut self, fr: &Frame) {
@@ -540,8 +574,14 @@ impl Synth {
         self.f1_open.set(fr.f[0] + fr.df1, fr.b[0] + fr.db1, sr);
         self.cascade[1].set(fr.f[1], fr.b[1], sr);
         self.cascade[2].set(fr.f[2], fr.b[2], sr);
-        for (i, &(f, b)) in CASCADE_HIGH.iter().enumerate() {
-            if f < 0.45 * sr {
+        let cascade_high = self.cascade_high;
+        for (i, &(f, b)) in cascade_high.iter().enumerate() {
+            // <= (not <), kept from Diego's Nov 16, 2026 fix: in the pre-retune
+            // pole set a 3600 Hz pole sat exactly on 0.45*8000, and <= restored
+            // it at 8 kHz. After the Nov 17 retune (KLSYN88 F4/F5/F6 + 6500) no
+            // pole sits exactly on the guard at any rate, so this is currently
+            // inert — kept so a future pole landing on the boundary is included.
+            if f <= 0.45 * sr {
                 self.cascade[i + 3].set(f, b, sr);
                 self.aspiration_cancel[i].set(f, b, sr);
             } else {
@@ -552,8 +592,8 @@ impl Synth {
                 };
             }
         }
-        for (r, &(f, b)) in self.aspiration_high.iter_mut().zip(&ASPIRATION_HIGH) {
-            if f < 0.45 * sr {
+        for (r, &(f, b)) in self.aspiration_high.iter_mut().zip(&self.aspiration_high_poles) {
+            if f <= 0.45 * sr {
                 r.set(f, b, sr);
             } else {
                 r.bypass();
@@ -569,10 +609,19 @@ impl Synth {
                 self.tilt.bypass();
             }
         }
-        let par_freqs = [fr.f[1], fr.f[2], F4, F5, F6];
+        let par_freqs = [fr.f[1], fr.f[2], self.parallel_upper[0], self.parallel_upper[1], self.parallel_upper[2]];
+        let par_bw = [PARALLEL_BW[0], PARALLEL_BW[1], self.parallel_upper_bw[0], self.parallel_upper_bw[1], self.parallel_upper_bw[2]];
         for i in 0..5 {
-            self.parallel[i].set(par_freqs[i], PARALLEL_BW[i], sr);
-            let g = self.parallel[i].gain_at(par_freqs[i], sr);
+            // Clamp the parallel formant to just below Nyquist instead of
+            // letting Resonator::set bypass it. At low sample rates F6
+            // (4990 Hz) is above Nyquist (8/10 kHz), and bypassing it leaves
+            // the A6 amplitude driving flat noise instead of a resonance, so
+            // fricatives (/s/, /th/) turn harsh and unfocused. Clamping
+            // keeps the resonance in-band (just lower). No-op at 11 kHz and
+            // above, where F6 already fits. (Diego, Nov 16, 2026.)
+            let f = par_freqs[i].min(0.48 * sr);
+            self.parallel[i].set(f, par_bw[i], sr);
+            let g = self.parallel[i].gain_at(f, sr);
             self.parallel_norm[i] = if g > 0.0 { 1.0 / g } else { 0.0 };
         }
     }
@@ -627,6 +676,24 @@ impl Synth {
         (frame as u64 * sample_rate as u64 / FRAME_RATE as u64) as usize
     }
 
+    /// Plays every frame `compression` times faster than planned: speech timed
+    /// at the natural rate, compressed evenly, as Klattara does above its normal
+    /// rate. Every sound and transition keeps its share of the time, and pitch,
+    /// noise and resonances are untouched; only how long each frame lasts
+    /// changes. Set before rendering an utterance; 1 is the natural timing.
+    pub fn set_compression(&mut self, compression: f64) {
+        self.compression = if compression.is_finite() && compression > 0.0 { compression } else { 1.0 };
+        self.frames_rendered = 0;
+    }
+
+    /// The first sample of `frame` when frames play `compression` times faster.
+    pub fn frame_start_at(frame: usize, sample_rate: u32, compression: f64) -> usize {
+        if compression == 1.0 {
+            return Self::frame_start(frame, sample_rate);
+        }
+        (frame as f64 * sample_rate as f64 / (FRAME_RATE as f64 * compression)).floor() as usize
+    }
+
     /// Renders frames to floating-point samples (unnormalized), preserving
     /// source, filter and fractional-sample timing state across calls.
     pub fn render(&mut self, frames: &[Frame]) -> Vec<f64> {
@@ -639,10 +706,19 @@ impl Synth {
                 || previous.df1 != fr.df1
                 || previous.db1 != fr.db1;
             self.configure(fr);
-            // Integer accounting avoids drift at rates with fractional samples per frame.
-            self.sample_remainder += self.sr as u64;
-            let n = (self.sample_remainder / FRAME_RATE as u64) as usize;
-            self.sample_remainder %= FRAME_RATE as u64;
+            let n = if self.compression == 1.0 {
+                // Integer accounting avoids drift at rates with fractional samples per frame.
+                self.sample_remainder += self.sr as u64;
+                let n = (self.sample_remainder / FRAME_RATE as u64) as usize;
+                self.sample_remainder %= FRAME_RATE as u64;
+                n
+            } else {
+                // Compressed: each frame ends where frame_start_at puts the next.
+                let k = self.frames_rendered as usize;
+                let sr = self.sr as u32;
+                Self::frame_start_at(k + 1, sr, self.compression) - Self::frame_start_at(k, sr, self.compression)
+            };
+            self.frames_rendered += 1;
             let av = db_to_lin(fr.av);
             let avs = db_to_lin(fr.avs) * VOICE_BAR_GAIN;
             let ah = db_to_lin(fr.ah) * ASPIRATION_GAIN;

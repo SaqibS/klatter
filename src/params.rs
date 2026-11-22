@@ -430,7 +430,7 @@ pub fn build_frames_with_time_scale(
     lens: &[usize],
     time_scale: f64,
 ) -> Vec<Frame> {
-    build_frames_cancellable(segs, starts, lens, time_scale, &|| false)
+    build_frames_cancellable(segs, starts, lens, time_scale, &prosody::Melody::default(), &|| false)
         .expect("uncancelled frame planning")
 }
 
@@ -439,12 +439,13 @@ pub(crate) fn build_frames_cancellable(
     starts: &[usize],
     lens: &[usize],
     time_scale: f64,
+    melody: &prosody::Melody,
     cancelled: &impl Fn() -> bool,
 ) -> Option<Vec<Frame>> {
     assert_eq!(segs.len(), starts.len());
     assert_eq!(segs.len(), lens.len());
     let formants = formant_tracks(segs, starts, lens, cancelled)?;
-    let f0 = prosody::f0_contour_cancellable(segs, starts, lens, FRAME_MS, time_scale, cancelled)?;
+    let f0 = prosody::f0_contour_cancellable(segs, starts, lens, FRAME_MS, time_scale, melody, cancelled)?;
     let mut frames: Vec<Frame> = (0..formants.len())
         .map(|k| Frame {
             f0: f0[k],

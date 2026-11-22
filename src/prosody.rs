@@ -299,6 +299,27 @@ pub fn scale_durations(segs: &mut [Seg], scale: f64) {
     timing::assign(segs, scale);
 }
 
+/// Timing for even compression above the natural rate (`scale` below 1): the
+/// phones, their aspiration and their transitions keep their natural timing,
+/// which the synthesizer then plays `1 / scale` times faster
+/// (`klatt::Synth::set_compression`), while pauses are planned so that after
+/// that compression they are exactly as long as `scale_durations` makes them.
+/// The total length, and so the words per minute, is the same either way; but
+/// every sound and transition shrinks by the same factor, so vowels keep their
+/// steady states and consonants their place cues. Klattara speeds up this way,
+/// and its speech-recognition tests found it clearer than Klatt's rate rules
+/// (68% of words against 59% at about 350 words per minute, 36% against 30%
+/// at about 470); unevenly shrunk phones, where fixed-length transitions take
+/// over short vowels, are what makes fast speech mushy.
+pub fn scale_durations_evenly(segs: &mut [Seg], scale: f64) {
+    for seg in segs.iter_mut() {
+        if seg.ph.is_none() {
+            seg.dur_ms *= pause_scale(scale) / scale;
+        }
+    }
+    timing::assign(segs, 1.0);
+}
+
 /// Readers speed up mostly by pausing less, and articulate only a little
 /// faster: as reading rate rose 2.7-fold, the number of pauses fell 10.3-fold
 /// and their durations 1.6-fold, while articulation rate rose only 2.1-fold
@@ -333,6 +354,22 @@ const FIRST_ACCENT: f64 = 18.0;
 const ACCENT: f64 = 12.0;
 const DECLINATION_PER_SEC: f64 = 8.0;
 const ACCENT_RISE_MS: f64 = 200.0;
+
+/// The size of the pitch movements, which a voice's quality settings change
+/// (`st` and `fa` in [`crate::quality`]); the default is the contour above.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Melody {
+    /// Multiplies every accent's rise: 1 is the contour as designed.
+    pub accent_scale: f64,
+    /// How fast the baseline falls, in Hz per second.
+    pub declination: f64,
+}
+
+impl Default for Melody {
+    fn default() -> Self {
+        Melody { accent_scale: 1.0, declination: DECLINATION_PER_SEC }
+    }
+}
 const ACCENT_FALL_MS: f64 = 150.0;
 
 /// Builds an F0 track (Hz per frame) given each segment's first frame and
@@ -348,7 +385,7 @@ pub(crate) fn f0_contour_with_time_scale(
     frame_ms: f64,
     time_scale: f64,
 ) -> Vec<f64> {
-    f0_contour_cancellable(segs, starts, lens, frame_ms, time_scale, &|| false)
+    f0_contour_cancellable(segs, starts, lens, frame_ms, time_scale, &Melody::default(), &|| false)
         .expect("uncancelled pitch planning")
 }
 
@@ -358,6 +395,7 @@ pub(crate) fn f0_contour_cancellable(
     lens: &[usize],
     frame_ms: f64,
     time_scale: f64,
+    melody: &Melody,
     cancelled: &impl Fn() -> bool,
 ) -> Option<Vec<f64>> {
     let total: usize = lens.iter().sum();
@@ -394,6 +432,7 @@ pub(crate) fn f0_contour_cancellable(
             sentence_start,
             frame_ms / time_scale,
             &mut f0,
+            melody,
             cancelled,
         )?;
         // Silent-frame pitch must not flatten the clause's boundary tone.
@@ -402,7 +441,8 @@ pub(crate) fn f0_contour_cancellable(
         smooth(&mut f0[begin..end], 9);
     }
     add_microprosody(segs, starts, lens, frame_ms, &mut f0);
-    add_flutter(&mut f0, frame_ms);
+    // Flutter is a voice setting now (`fl` in crate::quality, off by default),
+    // added to the frames' pitch after planning.
     if cancelled() { None } else { Some(f0) }
 }
 
@@ -453,6 +493,7 @@ fn clause_contour(
     sentence_start: usize,
     natural_frame_ms: f64,
     f0: &mut [f64],
+    melody: &Melody,
     cancelled: &impl Fn() -> bool,
 ) -> Option<()> {
     let begin = starts[0];
@@ -462,7 +503,7 @@ fn clause_contour(
         .collect();
     let baseline = |frame: usize| {
         let secs = (frame - sentence_start) as f64 * natural_frame_ms / 1000.0;
-        (START_F0 - DECLINATION_PER_SEC * secs).max(BASE_F0)
+        (START_F0 - melody.declination * secs).max(BASE_F0)
     };
     // Hertz, Younes & Zinovieva (1999, p. 2285) put the accent's high target
     // a set percentage of the way through the acoustic nucleus without giving
@@ -488,7 +529,7 @@ fn clause_contour(
             } else {
                 ease(1.0 - (t - peak) / fall)
             };
-            m.max(if n == 0 { FIRST_ACCENT } else { ACCENT } * shape)
+            m.max(if n == 0 { FIRST_ACCENT } else { ACCENT } * melody.accent_scale * shape)
         });
         f0[frame] = baseline(frame) + bump;
     }
@@ -537,18 +578,6 @@ fn smooth(f0: &mut [f64], width: usize) {
         let lo = i.saturating_sub(half);
         let hi = (i + half + 1).min(src.len());
         f0[i] = src[lo..hi].iter().sum::<f64>() / (hi - lo) as f64;
-    }
-}
-
-/// Slow quasi-random F0 drift (KLSYN88 "flutter") so steady vowels don't sound
-/// mechanical. Klatt & Klatt (1990) found FL = 25% sounds realistic.
-fn add_flutter(f0: &mut [f64], frame_ms: f64) {
-    use std::f64::consts::TAU;
-    const FL: f64 = 25.0;
-    for (i, v) in f0.iter_mut().enumerate() {
-        let t = i as f64 * frame_ms / 1000.0;
-        let wobble = (TAU * 12.7 * t).sin() + (TAU * 7.1 * t).sin() + (TAU * 4.7 * t).sin();
-        *v += (FL / 50.0) * (*v / 100.0) * wobble;
     }
 }
 
@@ -644,7 +673,7 @@ mod tests {
         assign_durations(&mut segs);
         let (starts, lens) = crate::params::frame_layout(&segs);
         let polls = std::cell::Cell::new(0);
-        let result = f0_contour_cancellable(&segs, &starts, &lens, 5.0, 1.0, &|| {
+        let result = f0_contour_cancellable(&segs, &starts, &lens, 5.0, 1.0, &Melody::default(), &|| {
             polls.set(polls.get() + 1);
             polls.get() == 10
         });
@@ -785,6 +814,7 @@ mod tests {
             0,
             5.0,
             &mut natural,
+            &Melody::default(),
             &|| false,
         )
         .unwrap();
@@ -811,6 +841,7 @@ mod tests {
             0,
             10.0,
             &mut fast,
+            &Melody::default(),
             &|| false,
         )
         .unwrap();

@@ -7,16 +7,61 @@ from collections import OrderedDict
 
 import config
 import nvwave
+from autoSettingsUtils.driverSetting import BooleanDriverSetting, DriverSetting, NumericDriverSetting
+from autoSettingsUtils.utils import StringParameterInfo
 from logHandler import log
 from speech.commands import IndexCommand, PitchCommand
 from synthDriverHandler import SynthDriver as BaseSynthDriver
 from synthDriverHandler import VoiceInfo, synthDoneSpeaking, synthIndexReached
 
-SAMPLE_RATE = 16000
+# Klatter's own rate, and the 20 rates Klattara offers. The sample rate is a
+# choice among these, not a slider: a slider over 8000-96000 cannot land on
+# an exact rate. The engine renders at any of them (each checked clean).
+DEFAULT_SAMPLE_RATE = 16000
+SAMPLE_RATES = (
+    8000, 10000, 11000, 11025, 12000, 16000, 20000, 22000, 22050, 24000,
+    32000, 40000, 44000, 44100, 48000, 64000, 80000, 88000, 88200, 96000,
+)
+SAMPLE_RATE = DEFAULT_SAMPLE_RATE  # kept for speak_items' callers and tests
 BYTES_PER_SAMPLE = 2
-# Short pieces let a cancel take effect quickly even during a long utterance.
-FEED_BYTES = SAMPLE_RATE // 10 * BYTES_PER_SAMPLE
 DLL_PATH = os.path.join(os.path.dirname(__file__), "klatter.dll")
+
+# The exact rate and pitch, set in the Klatter settings panel. Klatter's rate is
+# in words per minute already; these are the ends it is checked at.
+MIN_WPM, MAX_WPM = 30, 1920
+MIN_PITCH_HZ, MAX_PITCH_HZ = 40, 400
+
+# Voice quality, in the order of the engine's quality array (src/quality.rs),
+# with NVDA's setting id and label for each. A test checks this against the
+# DLL's own klatter_parameter_info. Flutter is off by default.
+QUALITY = (
+    # code, setting id, label, default, min, max, step
+    ("fl", "flutter", "&Flutter", 0, 0, 100, 5),
+    ("hs", "headSize", "H&ead size", 100, 64, 135, 1),
+    ("rg", "roughness", "&Roughness", 0, 0, 100, 5),
+    ("br", "breathiness", "&Breathiness", 0, 0, 72, 2),
+    ("oq", "openQuotient", "&Open quotient", 50, 20, 90, 1),
+    ("tl", "spectralTilt", "Spectral &tilt", 0, 0, 41, 1),
+    ("vvl", "voicingLevel", "&Voicing level", 100, 0, 200, 5),
+    ("fvl", "fricationLevel", "Fr&ication level", 100, 0, 200, 5),
+    ("avl", "aspirationLevel", "As&piration level", 100, 0, 200, 5),
+    ("st", "accentSize", "Accent si&ze", 100, 0, 300, 10),
+    ("fa", "baselineFall", "Baseline fa&ll", 8, 0, 40, 1),
+    ("f4", "f4", "F&4 in hertz", 3250, 2000, 6000, 50),
+    ("b4", "f4Bandwidth", "F4 bandwidth", 200, 50, 2000, 10),
+    ("f5", "f5", "F&5 in hertz", 3700, 2500, 6500, 50),
+    ("b5", "f5Bandwidth", "F5 bandwidth", 200, 50, 2000, 10),
+    ("f6", "f6", "F&6 in hertz", 4990, 3000, 8000, 50),
+    ("b6", "f6Bandwidth", "F6 bandwidth", 500, 50, 3000, 10),
+)
+
+
+def feed_bytes(sample_rate):
+    """Short pieces let a cancel take effect quickly: a tenth of a second."""
+    return sample_rate // 10 * BYTES_PER_SAMPLE
+
+
+FEED_BYTES = feed_bytes(DEFAULT_SAMPLE_RATE)
 
 
 class KlatterVoice(ctypes.Structure):
@@ -66,7 +111,40 @@ def load_engine(path):
     dll.klatter_cancel.restype = None
     dll.klatter_cancel_free.argtypes = [ctypes.c_void_p]
     dll.klatter_cancel_free.restype = None
+    quality = ctypes.POINTER(ctypes.c_double)
+    dll.klatter_utterance_create_quality.argtypes = (
+        dll.klatter_speak.argtypes + [quality, ctypes.c_size_t, ctypes.c_void_p]
+    )
+    dll.klatter_utterance_create_quality.restype = ctypes.c_void_p
+    dll.klatter_parameter_count.argtypes = []
+    dll.klatter_parameter_count.restype = ctypes.c_size_t
+    dll.klatter_parameter_info.argtypes = [ctypes.c_size_t, ctypes.POINTER(KlatterParameterInfo)]
+    dll.klatter_parameter_info.restype = ctypes.c_int
     return dll
+
+
+class KlatterParameterInfo(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_char_p), ("name", ctypes.c_char_p),
+                ("unit", ctypes.c_char_p), ("help", ctypes.c_char_p),
+                ("min", ctypes.c_double), ("max", ctypes.c_double),
+                ("default_value", ctypes.c_double), ("step", ctypes.c_double)]
+
+
+def parameter_table(dll):
+    """The engine's own settings: (code, default, min, max) for each index."""
+    table = []
+    for index in range(dll.klatter_parameter_count()):
+        info = KlatterParameterInfo()
+        dll.klatter_parameter_info(index, ctypes.byref(info))
+        table.append((info.code.decode(), info.default_value, info.min, info.max))
+    return table
+
+
+def whole(value, low, high):
+    """A whole number within range. NVDA's config refuses a float for an
+    integer setting, and wx.SpinCtrl refuses one too: Klattara's stuck OK
+    button came from exactly that, so every stored value goes through here."""
+    return int(min(high, max(low, round(value))))
 
 
 def encode_items(items):
@@ -95,26 +173,64 @@ def speak_items(dll, items, voice):
         dll.klatter_free(result)
 
 
-def make_voice(default, rate, pitch, inflection, volume):
+def make_voice(default, rate, pitch, inflection, volume, wpm=None, pitch_hz=None):
     """Maps NVDA's 0-100 settings, where 50 is Klatter's natural voice, onto
-    physical units. Rate and pitch are exponential so each step sounds alike."""
+    physical units. Rate and pitch are exponential so each step sounds alike.
+    An exact words per minute or hertz, when given, replaces the slider's."""
+    hz = default.pitch_hz * 2 ** ((pitch - 50) / 50)
+    if pitch_hz is not None:
+        # A pitch command (as for capitals) still moves an exact pitch by the
+        # same ratio as it moves the slider's.
+        hz = pitch_hz * 2 ** ((pitch - 50) / 50)
     return KlatterVoice(
-        wpm=default.wpm * 2 ** ((rate - 50) / 50),
-        pitch_hz=default.pitch_hz * 2 ** ((pitch - 50) / 50),
+        wpm=wpm if wpm is not None else default.wpm * 2 ** ((rate - 50) / 50),
+        pitch_hz=hz,
         inflection=default.inflection * inflection / 50,
         volume=volume / 100,
+    )
+
+
+def _quality_setting(code, setting_id, label, default, low, high, step):
+    return NumericDriverSetting(
+        setting_id, label, defaultVal=default, minVal=low, maxVal=high,
+        minStep=step, normalStep=step, largeStep=step * 5,
     )
 
 
 class SynthDriver(BaseSynthDriver):
     name = "klatter"
     description = "Klatter"
+    # The exact rate and pitch are hidden from NVDA's automatic Speech panel
+    # (ids starting with an underscore are skipped) and set in the Klatter
+    # panel instead, with exact numeric inputs; they are still saved. They are
+    # plain attributes of the same names, with no _get_/_set_ methods: NVDA
+    # would make such methods into properties named _rateWpm and so on, and
+    # storing the value would then call the setter forever.
+    _rateWpmSetting = NumericDriverSetting(
+        "_rateWpm", "Rate in &words per minute", defaultVal=219, minVal=MIN_WPM, maxVal=MAX_WPM,
+    )
+    _rateInWpmSetting = BooleanDriverSetting("_rateInWpm", "Use rate in words per &minute", defaultVal=False)
+    _pitchHertzSetting = NumericDriverSetting(
+        "_pitchHertz", "Pitch in &hertz", defaultVal=100, minVal=MIN_PITCH_HZ, maxVal=MAX_PITCH_HZ,
+    )
+    _pitchInHertzSetting = BooleanDriverSetting("_pitchInHertz", "Use pitch in &hertz", defaultVal=False)
+    _sampleRateSetting = DriverSetting(
+        "sampleRate",
+        # Higher rates carry more of the hiss of S and F; lower ones sound duller.
+        "Sample &rate",
+        defaultVal=str(DEFAULT_SAMPLE_RATE),
+    )
     supportedSettings = (
         BaseSynthDriver.RateSetting(),
+        _rateWpmSetting,
+        _rateInWpmSetting,
         BaseSynthDriver.PitchSetting(),
+        _pitchHertzSetting,
+        _pitchInHertzSetting,
         BaseSynthDriver.InflectionSetting(),
         BaseSynthDriver.VolumeSetting(),
-    )
+        _sampleRateSetting,
+    ) + tuple(_quality_setting(*q) for q in QUALITY)
     supportedCommands = {IndexCommand, PitchCommand}
     supportedNotifications = {synthIndexReached, synthDoneSpeaking}
 
@@ -126,15 +242,21 @@ class SynthDriver(BaseSynthDriver):
         super().__init__()
         self._rate = self._pitch = self._inflection = 50
         self._volume = 100
+        self._rateWpm = self._rateWpmSetting.defaultVal
+        self._rateInWpm = False
+        self._pitchHertz = self._pitchHertzSetting.defaultVal
+        self._pitchInHertz = False
+        # True while settings load, so a restored slider does not switch the
+        # exact modes off; set by loadSettings.
+        self._loadingSettings = False
+        self._sampleRate = DEFAULT_SAMPLE_RATE
+        self._quality = {q[1]: q[3] for q in QUALITY}
         self._dll = load_engine(DLL_PATH)
         self._default = KlatterVoice()
         self._dll.klatter_default_voice(ctypes.byref(self._default))
-        self._player = nvwave.WavePlayer(
-            channels=1,
-            samplesPerSec=SAMPLE_RATE,
-            bitsPerSample=BYTES_PER_SAMPLE * 8,
-            outputDevice=config.conf["audio"]["outputDevice"],
-        )
+        self._player = None
+        self._playerRate = None
+        self._ensurePlayer()
         # Bumped by cancel; work tagged with an older generation is abandoned.
         self._generation = 0
         self._cancel_lock = threading.Lock()
@@ -143,11 +265,60 @@ class SynthDriver(BaseSynthDriver):
         self._thread = threading.Thread(target=self._run, name="klatter", daemon=True)
         self._thread.start()
 
+    def _ensurePlayer(self):
+        """Opens the player at the chosen sample rate, or reopens it when the
+        rate has changed. The speech thread calls this between utterances."""
+        if self._player is not None and self._playerRate == self._sampleRate:
+            return
+        player = nvwave.WavePlayer(
+            channels=1,
+            samplesPerSec=self._sampleRate,
+            bitsPerSample=BYTES_PER_SAMPLE * 8,
+            outputDevice=config.conf["audio"]["outputDevice"],
+        )
+        old, self._player, self._playerRate = self._player, player, self._sampleRate
+        if old is not None:
+            old.close()
+
+    def loadSettings(self, onlyChanged=False):
+        if not onlyChanged:
+            self._loadingSettings = True
+        try:
+            super().loadSettings(onlyChanged)
+        finally:
+            self._loadingSettings = False
+
+    def saveSettings(self):
+        # NVDA refuses a float or out-of-range value for an integer setting as
+        # it saves, which would leave OK and Apply doing nothing.
+        self._rateWpm = whole(self._rateWpm, MIN_WPM, MAX_WPM)
+        self._pitchHertz = whole(self._pitchHertz, MIN_PITCH_HZ, MAX_PITCH_HZ)
+        for code, setting_id, label, default, low, high, step in QUALITY:
+            self._quality[setting_id] = whole(self._quality[setting_id], low, high)
+        super().saveSettings()
+
     def _getAvailableVoices(self):
         return OrderedDict(klatter=VoiceInfo("klatter", "Klatter", "en"))
 
     def _get_voice(self):
         return "klatter"
+
+    # NVDA's dialog builds this name as f"available{id.capitalize()}s", and
+    # "sampleRate".capitalize() is "Samplerate": a capital R would make the
+    # lookup miss and the combo box never appear (Klattara 1.7 did that).
+    def _get_availableSamplerates(self):
+        return OrderedDict(
+            (str(rate), StringParameterInfo(str(rate), f"{rate} Hz")) for rate in SAMPLE_RATES
+        )
+
+    def _get_sampleRate(self):
+        return str(self._sampleRate)
+
+    def _set_sampleRate(self, value):
+        rate = int(value)
+        if rate not in SAMPLE_RATES:
+            raise ValueError(f"Unsupported sample rate: {value}")
+        self._sampleRate = rate
 
     # NVDA's base driver discards settings, so each one needs storage here.
     def _get_rate(self):
@@ -155,12 +326,27 @@ class SynthDriver(BaseSynthDriver):
 
     def _set_rate(self, value):
         self._rate = value
+        # Moving NVDA's rate slider goes back to its scale, as in Klattara.
+        if not self._loadingSettings:
+            self._rateInWpm = False
+
+    def configure_rate_wpm(self, enabled, wpm):
+        """Called by the Klatter settings panel."""
+        self._rateWpm = whole(wpm, MIN_WPM, MAX_WPM)
+        self._rateInWpm = bool(enabled)
 
     def _get_pitch(self):
         return self._pitch
 
     def _set_pitch(self, value):
         self._pitch = value
+        if not self._loadingSettings:
+            self._pitchInHertz = False
+
+    def configure_pitch_hertz(self, enabled, hertz):
+        """Called by the Klatter settings panel."""
+        self._pitchHertz = whole(hertz, MIN_PITCH_HZ, MAX_PITCH_HZ)
+        self._pitchInHertz = bool(enabled)
 
     def _get_inflection(self):
         return self._inflection
@@ -173,6 +359,27 @@ class SynthDriver(BaseSynthDriver):
 
     def _set_volume(self, value):
         self._volume = value
+
+    # A getter and setter for each voice-quality setting (_get_flutter,
+    # _set_flutter, ...), made here in the class body: NVDA turns _get_ and
+    # _set_ methods into properties as the class is created, so ones added
+    # afterwards would not exist for its settings dialog, and saving would fail.
+    def _quality_getter(setting_id, low, high):
+        return lambda self: whole(self._quality[setting_id], low, high)
+
+    def _quality_setter(setting_id, low, high):
+        def setter(self, value):
+            self._quality[setting_id] = whole(value, low, high)
+        return setter
+
+    for _code, _id, _label, _default, _low, _high, _step in QUALITY:
+        vars()[f"_get_{_id}"] = _quality_getter(_id, _low, _high)
+        vars()[f"_set_{_id}"] = _quality_setter(_id, _low, _high)
+    del _code, _id, _label, _default, _low, _high, _step, _quality_getter, _quality_setter
+
+    def _quality_array(self):
+        values = [float(self._quality[q[1]]) for q in QUALITY]
+        return (ctypes.c_double * len(values))(*values)
 
     def speak(self, speechSequence):
         # A pitch change splits the sequence because the engine takes one voice per utterance.
@@ -191,11 +398,16 @@ class SynthDriver(BaseSynthDriver):
                 pitch = item.newValue
         if items:
             utterances.append((self._voice(pitch), items))
+        quality = self._quality_array()
         with self._cancel_lock:
-            self._queue.put((self._generation, utterances))
+            self._queue.put((self._generation, self._sampleRate, quality, utterances))
 
     def _voice(self, pitch):
-        return make_voice(self._default, self.rate, pitch, self.inflection, self.volume)
+        return make_voice(
+            self._default, self.rate, pitch, self.inflection, self.volume,
+            wpm=self._rateWpm if self._rateInWpm else None,
+            pitch_hz=self._pitchHertz if self._pitchInHertz else None,
+        )
 
     def cancel(self):
         # The lock protects the native handle from being freed while cancellation uses it.
@@ -222,10 +434,12 @@ class SynthDriver(BaseSynthDriver):
 
     def _run(self):
         while (task := self._queue.get()) is not None:
-            generation, utterances = task
+            generation, sample_rate, quality, utterances = task
             try:
+                if generation == self._generation and sample_rate != self._playerRate:
+                    self._ensurePlayer()
                 for voice, items in utterances:
-                    if not self._play(generation, voice, items):
+                    if not self._play(generation, voice, items, sample_rate, quality):
                         break
             except Exception:
                 log.error("Klatter could not speak", exc_info=True)
@@ -234,13 +448,16 @@ class SynthDriver(BaseSynthDriver):
                 if generation == self._generation and self._queue.empty():
                     synthDoneSpeaking.notify(synth=self)
 
-    def _play(self, generation, voice, items):
+    def _play(self, generation, voice, items, sample_rate=None, quality=None):
         """Returns False once this generation is cancelled."""
         if generation != self._generation:
             return False
+        sample_rate = sample_rate or self._sampleRate
+        quality = quality if quality is not None else self._quality_array()
         texts, marks = encode_items(items)
-        utterance = self._dll.klatter_utterance_create(
-            texts, marks, len(items), SAMPLE_RATE, ctypes.byref(voice), None,
+        utterance = self._dll.klatter_utterance_create_quality(
+            texts, marks, len(items), sample_rate, ctypes.byref(voice),
+            quality, len(quality), None,
         )
         if not utterance:
             raise ValueError("Klatter rejected the input")
@@ -253,7 +470,8 @@ class SynthDriver(BaseSynthDriver):
                 if generation != self._generation:
                     return False
                 self._active_cancel = cancel
-            output = (ctypes.c_int16 * (FEED_BYTES // BYTES_PER_SAMPLE))()
+            feed = feed_bytes(sample_rate)
+            output = (ctypes.c_int16 * (feed // BYTES_PER_SAMPLE))()
             block = KlatterPullBlock()
             position = 0
             while generation == self._generation:
@@ -269,7 +487,7 @@ class SynthDriver(BaseSynthDriver):
                     (block.mark_ids[k], (block.mark_samples[k] - position) * BYTES_PER_SAMPLE)
                     for k in range(block.mark_count)
                 ]
-                if not self._feed(generation, audio, offsets):
+                if not self._feed(generation, audio, offsets, feed):
                     return False
                 position += block.sample_count
                 if status == 0:
@@ -283,7 +501,7 @@ class SynthDriver(BaseSynthDriver):
                     self._dll.klatter_cancel_free(cancel)
             self._dll.klatter_utterance_free(utterance)
 
-    def _feed(self, generation, audio, marks):
+    def _feed(self, generation, audio, marks, feed=FEED_BYTES):
         if generation != self._generation:
             return False
         start = 0
@@ -294,11 +512,11 @@ class SynthDriver(BaseSynthDriver):
                     if generation == self._generation:
                         synthIndexReached.notify(synth=self, index=mark)
             # Empty pieces still carry their mark, as NVDA's eSpeak driver does.
-            for k in range(start, max(start + 1, end), FEED_BYTES):
+            for k in range(start, max(start + 1, end), feed):
                 if generation != self._generation:
                     return False
-                piece = audio[k:min(k + FEED_BYTES, end)]
-                last = k + FEED_BYTES >= end
+                piece = audio[k:min(k + feed, end)]
+                last = k + feed >= end
                 if piece or (last and onDone):
                     self._player.feed(piece, onDone=onDone if last else None)
                 if generation != self._generation:

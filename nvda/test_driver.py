@@ -25,8 +25,12 @@ class Notification:
 class WavePlayer:
     """Plays instantly: a chunk's callback fires as soon as it is fed."""
 
+    opened = []
+
     def __init__(self, channels, samplesPerSec, bitsPerSample, outputDevice):
-        assert (channels, samplesPerSec, bitsPerSample) == (1, 16000, 16)
+        assert (channels, bitsPerSample) == (1, 16)
+        WavePlayer.opened.append(samplesPerSec)
+        self.rate = samplesPerSec
         self.fed = bytearray()
         self.stops = 0
         self.on_feed = None
@@ -73,6 +77,34 @@ class BaseSynthDriver:
     def terminate(self):
         pass
 
+    def loadSettings(self, onlyChanged=False):
+        pass
+
+    def saveSettings(self):
+        # NVDA's config refuses a non-integer for an integer setting.
+        for setting in self.supportedSettings:
+            if isinstance(setting, NumericDriverSetting):
+                getter = getattr(self, "_get_" + setting.id, None)
+                value = getter() if getter else getattr(self, setting.id)
+                assert isinstance(value, int), (setting.id, value)
+                assert setting.minVal <= value <= setting.maxVal, (setting.id, value)
+        events.append(("saved", None))
+
+
+class DriverSetting:
+    def __init__(self, id, displayName, defaultVal=None, **kwargs):
+        self.id, self.displayName, self.defaultVal = id, displayName, defaultVal
+
+
+class NumericDriverSetting(DriverSetting):
+    def __init__(self, id, displayName, defaultVal=50, minVal=0, maxVal=100, **kwargs):
+        super().__init__(id, displayName, defaultVal)
+        self.minVal, self.maxVal = minVal, maxVal
+
+
+class BooleanDriverSetting(DriverSetting):
+    pass
+
 
 class Command:
     def __init__(self, value):
@@ -100,6 +132,10 @@ def install_stubs():
     module("config", conf={"audio": {"outputDevice": "default"}})
     module("nvwave", WavePlayer=WavePlayer)
     module("logHandler", log=types.SimpleNamespace(error=lambda *a, **k: events.append(("error", a))))
+    module("autoSettingsUtils")
+    module("autoSettingsUtils.driverSetting", DriverSetting=DriverSetting,
+           NumericDriverSetting=NumericDriverSetting, BooleanDriverSetting=BooleanDriverSetting)
+    module("autoSettingsUtils.utils", StringParameterInfo=lambda id, name: (id, name))
     module("speech")
     module("speech.commands", IndexCommand=IndexCommand, PitchCommand=PitchCommand)
     module("synthDriverHandler", SynthDriver=BaseSynthDriver, VoiceInfo=lambda *a: a,
@@ -125,7 +161,7 @@ class DriverTest(unittest.TestCase):
 
     def wait(self):
         done = threading.Event()
-        self.synth._queue.put((self.synth._generation, []))
+        self.synth._queue.put((self.synth._generation, self.synth._sampleRate, self.synth._quality_array(), []))
         deadline = time.monotonic() + 5
         while not any(e[0] == "done" for e in events):
             self.assertLess(time.monotonic(), deadline, f"Speech did not finish: {events[-10:]}")
@@ -201,20 +237,20 @@ class DriverTest(unittest.TestCase):
     def test_stale_requests_do_not_enter_native_synthesis(self):
         generation = self.synth._generation
         self.synth.cancel()
-        with patch.object(self.synth._dll, "klatter_utterance_create") as create:
+        with patch.object(self.synth._dll, "klatter_utterance_create_quality") as create:
             self.assertFalse(self.synth._play(generation, self.synth._voice(50), ["Stale."]))
             create.assert_not_called()
 
     def test_cancel_during_creation_prevents_the_first_read(self):
         generation = self.synth._generation
-        create = self.synth._dll.klatter_utterance_create
+        create = self.synth._dll.klatter_utterance_create_quality
 
         def cancelled_create(*args):
             utterance = create(*args)
             self.synth.cancel()
             return utterance
 
-        with patch.object(self.synth._dll, "klatter_utterance_create", cancelled_create):
+        with patch.object(self.synth._dll, "klatter_utterance_create_quality", cancelled_create):
             with patch.object(self.synth._dll, "klatter_utterance_read") as read:
                 self.assertFalse(self.synth._play(generation, self.synth._voice(50), ["Stale."]))
                 read.assert_not_called()
@@ -257,6 +293,82 @@ class DriverTest(unittest.TestCase):
                     cancel_free.assert_called_once()
                     free.assert_called_once()
         self.assertIsNone(self.synth._active_cancel)
+
+
+    # ---- Settings like Klattara's ------------------------------------------
+
+    def spoken_bytes(self, text="Hello there, how are you today?"):
+        events.clear()
+        player, start = self.synth._player, len(self.synth._player.fed)
+        self.synth.speak([text])
+        self.wait()
+        if self.synth._player is not player:
+            start = 0  # a new sample rate opened a new player
+        return bytes(self.synth._player.fed[start:])
+
+    def test_quality_table_matches_the_engine(self):
+        engine = klatter.parameter_table(self.synth._dll)
+        self.assertEqual(len(engine), len(klatter.QUALITY))
+        for (code, default, low, high), q in zip(engine, klatter.QUALITY):
+            self.assertEqual((code, default, low, high), (q[0], q[3], q[4], q[5]))
+
+    def test_flutter_is_off_by_default_and_adjustable(self):
+        self.assertEqual(self.synth._get_flutter(), 0)
+        plain = self.spoken_bytes()
+        self.synth._set_flutter(25)
+        self.assertNotEqual(self.spoken_bytes(), plain)
+
+    def test_every_quality_setting_reaches_the_engine(self):
+        plain = self.spoken_bytes("She sells fish.")
+        for code, setting_id, label, default, low, high, step in klatter.QUALITY:
+            getattr(self.synth, "_set_" + setting_id)(high if high != default else low)
+            self.assertNotEqual(self.spoken_bytes("She sells fish."), plain, setting_id)
+            getattr(self.synth, "_set_" + setting_id)(default)
+
+    def test_values_are_kept_whole_and_in_range(self):
+        self.synth._set_headSize(500.7)
+        self.assertEqual(self.synth._get_headSize(), 135)
+        self.synth.configure_rate_wpm(True, 5000.4)
+        self.synth.configure_pitch_hertz(True, 123.6)
+        self.assertEqual((self.synth._rateWpm, self.synth._pitchHertz), (1920, 124))
+        self.synth.saveSettings()
+        self.assertIn(("saved", None), events)
+
+    def test_every_sample_rate_is_offered_and_plays_at_that_rate(self):
+        rates = self.synth._get_availableSamplerates()
+        self.assertEqual(list(rates), [str(r) for r in klatter.SAMPLE_RATES])
+        self.assertEqual(self.synth._get_sampleRate(), "16000")
+        at16 = len(self.spoken_bytes())
+        for rate in (8000, 44100, 96000):
+            self.synth._set_sampleRate(str(rate))
+            n = len(self.spoken_bytes())
+            self.assertEqual(self.synth._player.rate, rate)
+            self.assertAlmostEqual(n / at16, rate / 16000, delta=0.01)
+        with self.assertRaises(ValueError):
+            self.synth._set_sampleRate("12345")
+
+    def test_rate_in_words_per_minute(self):
+        normal = len(self.spoken_bytes())
+        self.synth.configure_rate_wpm(True, 438)
+        fast = len(self.spoken_bytes())
+        self.assertLess(fast, normal * 0.6)
+        # Moving NVDA's rate slider goes back to its scale...
+        self.synth.rate = 50
+        self.assertFalse(self.synth._rateInWpm)
+        # ...but restoring saved settings does not.
+        self.synth.configure_rate_wpm(True, 438)
+        self.synth._loadingSettings = True
+        self.synth.rate = 50
+        self.synth._loadingSettings = False
+        self.assertTrue(self.synth._rateInWpm)
+
+    def test_pitch_in_hertz(self):
+        voice = self.synth._voice(50)
+        self.assertAlmostEqual(voice.pitch_hz, 100.0)
+        self.synth.configure_pitch_hertz(True, 150)
+        self.assertAlmostEqual(self.synth._voice(50).pitch_hz, 150.0)
+        # A pitch command (capitals) moves the exact pitch by the same ratio.
+        self.assertAlmostEqual(self.synth._voice(100).pitch_hz, 300.0)
 
 
 if __name__ == "__main__":

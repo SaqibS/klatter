@@ -1,0 +1,40 @@
+# Klatter's settings, read by the klatter command and so by Speech Dispatcher
+# (Orca). One "name = value" a line; # starts a comment. The command line wins.
+
+# Speaking rate in words per minute, 30 to 1920 (219 is natural). Speech
+# Dispatcher's rate doubles or halves this at its ends.
+rate = 219
+
+# Base pitch in hertz, 40 to 400 (100 is natural), and how much it moves, in
+# percent of natural (0 is monotone, 200 the most).
+pitch = 100
+inflection = 100
+
+# Volume in percent, 0 to 200.
+volume = 100
+
+# One of 8000 10000 11000 11025 12000 16000 20000 22000 22050 24000 32000
+# 40000 44000 44100 48000 64000 80000 88000 88200 96000.
+sample-rate = 16000
+
+# Flutter: how much the pitch wavers, 0 to 100. Off unless you turn it up.
+flutter = 0
+
+# Every voice-quality setting by its code (klatter --list-settings shows them
+# all with their ranges). Uncomment to change one.
+# hs = 100     head size, percent
+# rg = 0       roughness
+# br = 0       breathiness, decibels
+# oq = 50      open quotient, percent
+# tl = 0       spectral tilt, decibels
+# vvl = 100    voicing level, percent
+# fvl = 100    frication level, percent
+# avl = 100    aspiration level, percent
+# st = 100     accent size, percent
+# fa = 8       baseline fall, hertz per second
+# f4 = 3250    F4, hertz       b4 = 200
+# f5 = 3700    F5, hertz       b5 = 200
+# f6 = 4990    F6, hertz       b6 = 500
+
+# Pronunciation dictionaries: lines of a word and its ARPAbet sounds.
+# dictionary = ~/.config/klatter/words.txt

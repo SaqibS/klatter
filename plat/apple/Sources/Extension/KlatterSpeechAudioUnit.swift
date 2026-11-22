@@ -79,7 +79,7 @@ public final class KlatterSpeechAudioUnit: AVSpeechSynthesisProviderAudioUnit {
                                                    primaryLanguages: ["en-US"],
                                                    supportedLanguages: ["en-US"])
             v.gender = .male
-            v.version = "0.2.0"
+            v.version = "0.2.4"
             return [v]
         }
         set {}

@@ -24,10 +24,10 @@ android {
         applicationId = "com.dgomeze42.klatter"
         minSdk = 14
         targetSdk = 35
-        versionName = "0.2.2"
+        versionName = "0.2.4"
         // The same for every build, so any one can replace another in either
         // direction (a higher number on one would make the others "downgrades").
-        versionCode = 202
+        versionCode = 204
     }
 
     flavorDimensions += "device"

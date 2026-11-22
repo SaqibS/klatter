@@ -1,6 +1,6 @@
 [package]
 name = "klatter-cli"
-version = "0.2.0"
+version = "0.2.4"
 edition = "2024"
 license = "MIT"
 description = "Klatter for Linux and FreeBSD: speaks, saves WAV files, and serves Speech Dispatcher"

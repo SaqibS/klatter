@@ -11,7 +11,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.2.0"
+    MARKETING_VERSION: "0.2.4"
     CURRENT_PROJECT_VERSION: "1"
     KLATTER_BUNDLE_ID: com.dgomeze42.klatter
     DEVELOPMENT_TEAM: J4PD64C33Q

@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "klatter-cli"
-version = "0.2.0"
+version = "0.2.4"
 dependencies = [
  "klatter",
 ]
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "klatter-web"
-version = "0.2.0"
+version = "0.2.4"
 dependencies = [
  "klatter",
 ]

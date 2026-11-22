@@ -164,17 +164,18 @@ impl Utterance {
                 WordEvent {
                     item,
                     text_range: range,
-                    sample: klatt::Synth::frame_start(frame, self.sample_rate),
+                    sample: klatt::Synth::frame_start_at(frame, self.sample_rate, plan.compression),
                 }
             })
             .collect();
+        self.synth.set_compression(plan.compression);
         self.plan = Some(plan);
     }
 
     fn events(&mut self, rendered: &mut Rendered) {
         if let Some(plan) = &self.plan {
             while let Some(&(id, frame)) = plan.marks.get(self.next_mark) {
-                let sample = klatt::Synth::frame_start(frame, self.sample_rate);
+                let sample = klatt::Synth::frame_start_at(frame, self.sample_rate, plan.compression);
                 if sample > self.position {
                     break;
                 }

@@ -182,11 +182,12 @@ pub fn speak_stream_with_pronunciations(
     if !output(&[], &[]) {
         return false;
     }
-    let (frames, frame_marks) = frames_with_pronunciations(items, voice, pronunciations);
+    let AcousticPlan { frames, marks: frame_marks, compression, .. } = plan_items(items, voice, pronunciations);
     if !output(&[], &[]) {
         return false;
     }
     let mut synth = new_synth(sample_rate, voice);
+    synth.set_compression(compression);
     let mut marks = frame_marks.into_iter().peekable();
     let mut sample_start = 0;
     let gain = GAIN * voice.volume;
@@ -200,7 +201,7 @@ pub fn speak_stream_with_pronunciations(
         let mut block_marks = Vec::new();
         while marks.peek().is_some_and(|m| m.1 <= frame_end) {
             let (id, frame) = marks.next().unwrap();
-            let offset = klatt::Synth::frame_start(frame, sample_rate) - sample_start;
+            let offset = klatt::Synth::frame_start_at(frame, sample_rate, compression) - sample_start;
             block_marks.push((id, offset));
         }
         if !output(&pcm, &block_marks) {
@@ -221,14 +222,11 @@ pub(crate) fn new_synth(sample_rate: u32, voice: &Voice) -> klatt::Synth {
 }
 
 fn frames_with_marks(items: &[Item], voice: &Voice) -> (Vec<klatt::Frame>, Vec<(u32, usize)>) {
-    frames_with_pronunciations(items, voice, &Pronunciations::default())
+    let plan = plan_items(items, voice, &Pronunciations::default());
+    (plan.frames, plan.marks)
 }
 
-fn frames_with_pronunciations(
-    items: &[Item],
-    voice: &Voice,
-    pronunciations: &Pronunciations,
-) -> (Vec<klatt::Frame>, Vec<(u32, usize)>) {
+fn plan_items(items: &[Item], voice: &Voice, pronunciations: &Pronunciations) -> AcousticPlan {
     let mut tokens = Vec::new();
     for item in items {
         match *item {
@@ -243,14 +241,15 @@ fn frames_with_pronunciations(
         }
     }
     text::end_utterance(&mut tokens);
-    let plan = plan_tokens(&tokens, voice, pronunciations);
-    (plan.frames, plan.marks)
+    plan_tokens(&tokens, voice, pronunciations)
 }
 
 struct AcousticPlan {
     frames: Vec<klatt::Frame>,
     marks: Vec<(u32, usize)>,
     words: Vec<(usize, usize)>,
+    /// How much faster than planned the frames play (1 at and below the natural rate).
+    compression: f64,
 }
 
 fn plan_tokens(
@@ -278,6 +277,7 @@ fn plan_tokens_cancellable(
             frames: Vec::new(),
             marks: marks.into_iter().map(|(id, _)| (id, 0)).collect(),
             words: Vec::new(),
+            compression: 1.0,
         });
     }
     prosody::assign_durations(&mut segs);
@@ -285,7 +285,17 @@ fn plan_tokens_cancellable(
         return None;
     }
     let scale = duration_scale(voice.wpm);
-    prosody::scale_durations(&mut segs, scale);
+    // Faster than the natural rate, speech is planned at natural timing and
+    // compressed evenly (prosody::scale_durations_evenly); slower, the phones
+    // lengthen by the rules.
+    let compression = if scale < 1.0 { 1.0 / scale } else { 1.0 };
+    let time_scale = if compression > 1.0 {
+        prosody::scale_durations_evenly(&mut segs, scale);
+        1.0
+    } else {
+        prosody::scale_durations(&mut segs, scale);
+        scale
+    };
     if cancelled() {
         return None;
     }
@@ -294,8 +304,9 @@ fn plan_tokens_cancellable(
         accent_scale: voice.quality.accent_scale(),
         declination: voice.quality.declination(),
     };
-    let mut frames = params::build_frames_cancellable(&segs, &starts, &lens, scale, &melody, cancelled)?;
-    quality::apply(&mut frames, &voice.quality, klatt::FRAME_MS);
+    let mut frames = params::build_frames_cancellable(&segs, &starts, &lens, time_scale, &melody, cancelled)?;
+    // Flutter runs in real time, whatever the compression.
+    quality::apply(&mut frames, &voice.quality, klatt::FRAME_MS / compression);
     let pitch_scale = voice.pitch_hz / prosody::BASE_F0;
     for f in &mut frames {
         if cancelled() {
@@ -320,6 +331,7 @@ fn plan_tokens_cancellable(
             frames,
             marks,
             words,
+            compression,
         })
     }
 }
@@ -504,7 +516,10 @@ mod tests {
             let reading = (1.0 - NATURAL_PAUSE_SHARE) * scale
                 + NATURAL_PAUSE_SHARE * prosody::pause_scale(scale);
             assert!((reading * factor - 1.0).abs() < 1e-9);
-            let len = frames(SENTENCE, voice(factor)).len() as f64;
+            // Above the natural rate the frames are planned at natural timing
+            // and played faster, so the length is in the audio, not the frames.
+            let samples = speak(&[Item::Text(SENTENCE)], 16_000, &voice(factor)).samples.len() as f64;
+            let len = samples / (16_000.0 * klatt::FRAME_MS / 1000.0);
             assert!(
                 (len / normal / scale - 1.0).abs() < 0.1,
                 "{factor}: {len} vs {normal}"
@@ -732,8 +747,11 @@ mod tests {
                 volume: 0.5,
                 ..Voice::default()
             };
-            let (frames, marks) = frames_with_marks(&items, &voice);
-            let raw = klatt::Synth::new(sample_rate).render(&frames);
+            let plan = plan_items(&items, &voice, &Pronunciations::default());
+            let (frames, marks) = (plan.frames, plan.marks);
+            let mut synth = klatt::Synth::new(sample_rate);
+            synth.set_compression(plan.compression);
+            let raw = synth.render(&frames);
             let expected: Vec<i16> = raw
                 .iter()
                 .map(|x| {
@@ -744,7 +762,7 @@ mod tests {
                 .collect();
             let expected_marks: Vec<_> = marks
                 .iter()
-                .map(|&(id, f)| (id, klatt::Synth::frame_start(f, sample_rate)))
+                .map(|&(id, f)| (id, klatt::Synth::frame_start_at(f, sample_rate, plan.compression)))
                 .collect();
             let mut actual = Speech::default();
             let mut checkpoints = 0;

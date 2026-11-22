@@ -498,6 +498,12 @@ pub struct Synth {
     aspiration_high_poles: [(f64, f64); 2],
     parallel_upper: [f64; 3],
     parallel_upper_bw: [f64; 3],
+    /// How much faster than planned the frames play: 1 plays each frame for
+    /// FRAME_MS; above it, each is that much shorter (see `set_compression`).
+    compression: f64,
+    /// Frames rendered since the compression was set, to place each frame's
+    /// samples exactly where `frame_start_at` says they start.
+    frames_rendered: u64,
 }
 
 impl Synth {
@@ -533,6 +539,8 @@ impl Synth {
             aspiration_high_poles: ASPIRATION_HIGH,
             parallel_upper: [F4, F5, F6],
             parallel_upper_bw: [PARALLEL_BW[2], PARALLEL_BW[3], PARALLEL_BW[4]],
+            compression: 1.0,
+            frames_rendered: 0,
         };
         s.tilt.bypass();
         s.rgp_bar.set(0.0, 100.0, sr);
@@ -668,6 +676,24 @@ impl Synth {
         (frame as u64 * sample_rate as u64 / FRAME_RATE as u64) as usize
     }
 
+    /// Plays every frame `compression` times faster than planned: speech timed
+    /// at the natural rate, compressed evenly, as Klattara does above its normal
+    /// rate. Every sound and transition keeps its share of the time, and pitch,
+    /// noise and resonances are untouched; only how long each frame lasts
+    /// changes. Set before rendering an utterance; 1 is the natural timing.
+    pub fn set_compression(&mut self, compression: f64) {
+        self.compression = if compression.is_finite() && compression > 0.0 { compression } else { 1.0 };
+        self.frames_rendered = 0;
+    }
+
+    /// The first sample of `frame` when frames play `compression` times faster.
+    pub fn frame_start_at(frame: usize, sample_rate: u32, compression: f64) -> usize {
+        if compression == 1.0 {
+            return Self::frame_start(frame, sample_rate);
+        }
+        (frame as f64 * sample_rate as f64 / (FRAME_RATE as f64 * compression)).floor() as usize
+    }
+
     /// Renders frames to floating-point samples (unnormalized), preserving
     /// source, filter and fractional-sample timing state across calls.
     pub fn render(&mut self, frames: &[Frame]) -> Vec<f64> {
@@ -680,10 +706,19 @@ impl Synth {
                 || previous.df1 != fr.df1
                 || previous.db1 != fr.db1;
             self.configure(fr);
-            // Integer accounting avoids drift at rates with fractional samples per frame.
-            self.sample_remainder += self.sr as u64;
-            let n = (self.sample_remainder / FRAME_RATE as u64) as usize;
-            self.sample_remainder %= FRAME_RATE as u64;
+            let n = if self.compression == 1.0 {
+                // Integer accounting avoids drift at rates with fractional samples per frame.
+                self.sample_remainder += self.sr as u64;
+                let n = (self.sample_remainder / FRAME_RATE as u64) as usize;
+                self.sample_remainder %= FRAME_RATE as u64;
+                n
+            } else {
+                // Compressed: each frame ends where frame_start_at puts the next.
+                let k = self.frames_rendered as usize;
+                let sr = self.sr as u32;
+                Self::frame_start_at(k + 1, sr, self.compression) - Self::frame_start_at(k, sr, self.compression)
+            };
+            self.frames_rendered += 1;
             let av = db_to_lin(fr.av);
             let avs = db_to_lin(fr.avs) * VOICE_BAR_GAIN;
             let ah = db_to_lin(fr.ah) * ASPIRATION_GAIN;

@@ -299,6 +299,27 @@ pub fn scale_durations(segs: &mut [Seg], scale: f64) {
     timing::assign(segs, scale);
 }
 
+/// Timing for even compression above the natural rate (`scale` below 1): the
+/// phones, their aspiration and their transitions keep their natural timing,
+/// which the synthesizer then plays `1 / scale` times faster
+/// (`klatt::Synth::set_compression`), while pauses are planned so that after
+/// that compression they are exactly as long as `scale_durations` makes them.
+/// The total length, and so the words per minute, is the same either way; but
+/// every sound and transition shrinks by the same factor, so vowels keep their
+/// steady states and consonants their place cues. Klattara speeds up this way,
+/// and its speech-recognition tests found it clearer than Klatt's rate rules
+/// (68% of words against 59% at about 350 words per minute, 36% against 30%
+/// at about 470); unevenly shrunk phones, where fixed-length transitions take
+/// over short vowels, are what makes fast speech mushy.
+pub fn scale_durations_evenly(segs: &mut [Seg], scale: f64) {
+    for seg in segs.iter_mut() {
+        if seg.ph.is_none() {
+            seg.dur_ms *= pause_scale(scale) / scale;
+        }
+    }
+    timing::assign(segs, 1.0);
+}
+
 /// Readers speed up mostly by pausing less, and articulate only a little
 /// faster: as reading rate rose 2.7-fold, the number of pauses fell 10.3-fold
 /// and their durations 1.6-fold, while articulation rate rose only 2.1-fold
